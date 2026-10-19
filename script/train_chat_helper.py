@@ -7,7 +7,7 @@ code\train_llm.py 得到，所以脚本换位置也不会失效。
 职责：
     · 挑一个装了 torch 的 python；依赖缺失就直接终止，并让用户去跑自检脚本；
     · 打印运行模式（CPU / GPU 单精度 / GPU 混合精度）与占用的显存或内存；
-    · 训练：列出 src\ 下的语料让用户选（默认 src\chat_demo.txt），模型名称由用户现场输入；
+    · 训练：列出 src\ 下的语料让用户选（默认 src\chat_demo.jsonl），模型名称由用户现场输入；
     · 对话：模型默认 model\chat_demo.pt（缺失即终止），也可输编号或名称换一个。
 
 模型名称只存在于本次运行的变量里，不写进任何文件，也不回显。
@@ -49,7 +49,9 @@ def find_root(start):
 ROOT = find_root(HERE)
 CODE = os.path.join(ROOT, "code")
 
-DEFAULT_CORPUS = os.path.join(ROOT, "src", "chat_demo.txt")
+_DEMO_JSONL = os.path.join(ROOT, "src", "chat_demo.jsonl")
+# demo 语料只有考题库这一份（由 script\fetch_exam_data.bat 生成）
+DEFAULT_CORPUS = _DEMO_JSONL
 DEFAULT_MODEL = os.path.join(ROOT, "model", "chat_demo.pt")
 
 # 配置文件所在目录（可放多份，train.bat 会让用户按编号选）
@@ -57,8 +59,11 @@ CONFIG_DIR = os.path.join(ROOT, "properties")
 
 # 这些键会原样传给 code/train_llm.py（它的 CONFIG 里都有同名项）
 TRAIN_KEYS = ("n_layer", "n_head", "n_embd", "block_size", "batch_size",
-              "max_iters", "eval_interval", "lr", "dropout", "weight_decay",
-              "grad_clip", "seed", "max_vocab", "val_frac", "cache_dir")
+              "max_iters", "eval_interval", "eval_iters", "lr", "dropout",
+              "weight_decay", "grad_clip", "seed", "max_vocab", "val_frac",
+              "cache_dir", "grad_accum", "warmup_iters", "lr_decay",
+              "min_lr_frac", "grad_checkpoint", "resume", "save_every",
+              "save_dtype", "save_optimizer")
 
 # 训练档位：命令行 -p 指定（配置文件里一般直接写满各项，不用档位）
 PROFILES = {
@@ -402,7 +407,7 @@ def pick_corpus(given):
         print(f"       把语料放进 {short(os.path.join(ROOT, 'src'))} 再重跑。")
         return None, "empty"
 
-    # ---- 交互选择：直接回车 = chat_demo.txt（没有就第一个）----
+    # ---- 交互选择：直接回车 = chat_demo.jsonl（没有就第一个）----
     default = next((p for p in listing
                     if os.path.basename(p) == os.path.basename(DEFAULT_CORPUS)), listing[0])
     print("可用语料：")
@@ -513,6 +518,8 @@ def do_train_config(cfg, cfg_path):
     if not data or not os.path.isfile(data):
         print(f"[错误] 配置里的 data_path 找不到：{cfg.get('data_path') or '(空)'}")
         print(f"       解析后路径：{data or '(空)'}")
+        if data and os.path.basename(data).startswith("chat_demo"):
+            print("       demo 语料还没生成，先跑：script\\fetch_exam_data.bat")
         return 1
     head = open(data, "rb").read(2)
     if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
@@ -811,25 +818,29 @@ def do_chat(name):
             print("       当前也没有任何其它 .pt。请先准备语料和模型（或先训练一个），再重新运行。")
             return 1
 
-        print(f"\n默认模型：{short(DEFAULT_MODEL)}"
-              + ("" if default_exists else "（不存在）"))
-        others = [p for p in listing if os.path.abspath(p) != os.path.abspath(DEFAULT_MODEL)]
-        if others:
-            print("其它可选模型：")
-            for i, p in enumerate(others, 1):
-                print(f"  [{i}] {short(p)}")
+        # 全部模型一起编号，默认那个也列出来（只是标注一下），
+        # 免得只看到「其它模型」里没有 demo，误以为模型丢了
+        print("\n可用模型：")
+        for i, p in enumerate(listing, 1):
+            mark = "  ← 默认" if os.path.abspath(p) == os.path.abspath(DEFAULT_MODEL) else ""
+            print(f"  [{i}] {short(p)}{mark}")
+        if not default_exists:
+            print(f"       （默认模型 {short(DEFAULT_MODEL)} 还不存在，先训练或选别的）")
 
         raw = ask("请输入模型名称或编号（直接回车用默认模型）")
+        if raw is None:
+            print("\n[取消] 读不到键盘输入。")
+            return 1
         if not raw:
             raw = DEFAULT_MODEL
-        if raw == DEFAULT_MODEL:
+        if os.path.basename(raw).lower() == os.path.basename(DEFAULT_MODEL).lower():
             target = DEFAULT_MODEL
             if not default_exists:
                 print(f"[错误] 找不到默认模型：{short(DEFAULT_MODEL)}")
-                print("       请先准备语料和模型（src\\chat_demo.txt 与 model\\chat_demo.pt），再重新运行。")
+                print("       请先准备语料和模型（src\\chat_demo.jsonl 与 model\\chat_demo.pt），再重新运行。")
                 return 1
-        elif raw.isdigit() and others and 1 <= int(raw) <= len(others):
-            target = others[int(raw) - 1]
+        elif raw.isdigit() and listing and 1 <= int(raw) <= len(listing):
+            target = listing[int(raw) - 1]
         else:
             cand = safe_name(raw)
             if not cand:
@@ -885,7 +896,7 @@ def main():
         if a.cwd:
             ROOT = find_root(os.path.abspath(a.cwd))
             CODE = os.path.join(ROOT, "code")
-            DEFAULT_CORPUS = os.path.join(ROOT, "src", "chat_demo.txt")
+            DEFAULT_CORPUS = os.path.join(ROOT, "src", "chat_demo.jsonl")
             DEFAULT_MODEL = os.path.join(ROOT, "model", "chat_demo.pt")
         exe, _ = find_python()
         if exe:

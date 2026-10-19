@@ -41,7 +41,7 @@
 
 想先确认环境是否装好，双击 `script\torch_check.bat`，它会逐项检查并在最后给出结论。
 
-> 自带两个配置：`chat_demo.properties`（`src\chat_demo.txt`，约 20 秒跑完）和
+> 自带两个配置：`chat_demo.properties`（考题库 demo，13.7 M 参数，几分钟）和
 > `dlqq_llm.properties`（`src\dlqq_llm.jsonl`，GB 级语料）。对话默认用 `model\chat_demo.pt`。
 > **语料或模型缺失时会直接终止**，并提示你怎么补上。
 
@@ -130,7 +130,8 @@ python=D:\Soft\Python\Python3_13_9\python.exe
 ```
 Available configs:
   [1] chat_demo.properties
-  [2] dlqq_llm.properties
+  [2] dlqq_0.1b.properties
+  [3] dlqq_llm.properties
 
 Select a number (Enter = 1): 1
 ```
@@ -142,9 +143,9 @@ Select a number (Enter = 1): 1
 [python]  D:\Soft\Python\Python3_13_9\python.exe
 
   训练（配置文件：chat_demo.properties）
-[语料] src\chat_demo.txt
+[语料] src\chat_demo.jsonl
 [输出] model\chat_demo.pt
-[参数] n_layer=4 n_head=4 n_embd=128 block_size=128 batch_size=32 max_iters=3000 ...
+[参数] n_layer=6 n_head=6 n_embd=384 block_size=256 batch_size=32 max_iters=3000 ...
 [环境] D:\Soft\Python\Python3_13_9\python.EXE
 ```
 
@@ -156,7 +157,8 @@ Select a number (Enter = 1): 1
 
 | 文件 | 语料 | 档位 | 说明 |
 |---|---|---|---|
-| `chat_demo.properties` | `src\chat_demo.txt` | small（0.9 M 参数） | 演示用，约 20 秒 |
+| `chat_demo.properties` | `src\chat_demo.jsonl` | medium（13.7 M 参数） | 考题库 demo，几分钟 |
+| `dlqq_0.1b.properties` | `src\dlqq_llm.jsonl` | 12 层 768 维（91 M） | 0.1B 长训练，约 18 小时 |
 | `dlqq_llm.properties` | `src\dlqq_llm.jsonl` | large（33 M 参数） | GB 级语料，约 1 小时 |
 
 **所有参数都在文件里**，改完保存就生效，不需要碰代码：
@@ -189,7 +191,7 @@ script\train.bat my.properties          REM 指定任意配置文件名
 配置文件覆盖不到的临时调整，可以直接传参：
 
 ```bat
-python code\train_llm.py data_path=src\chat_demo.txt out_path=model\chat_demo.pt max_iters=3000
+python code\train_llm.py data_path=src\chat_demo.jsonl out_path=model\chat_demo.pt max_iters=3000
 ```
 
 > 参数是 `key=value` 形式，**不是** `--key value`。
@@ -276,6 +278,22 @@ python code\train_llm.py data_path=src\我的语料.txt out_path=model\我的模
 
 脚本会自动识别 `utf-8 / utf-8-sig / gb18030 / big5` 编码，记事本存的 GBK 文件也能直接读。
 
+### 下载来的语料要先清洗
+
+从维基、fineweb 这类源下回来的东西不能直接喂（维基是 `{{模板}}` `[[链接]]`，网页语料混着英文和广告）。
+`ai_res\script\prepare_corpus.py` 负责转换和清洗：
+
+```bat
+REM 维基 dump（wikiextractor 的输出，每行一个 JSON）
+python ai_res\script\prepare_corpus.py --in ai_res\doc\zhwiki --out ai_res\doc\zhwiki.txt --wikitext
+
+REM parquet（fineweb 之类，自动找 text 列）
+python ai_res\script\prepare_corpus.py --in ai_res\doc\fineweb --out ai_res\doc\fineweb.txt --min-chars 100
+```
+
+它会做：剥维基标记、统一空白、长度过滤（`--min-chars`）、中文占比过滤（`--min-zh`）、按行去重，
+最后输出训练脚本能直接吃的 `.txt`（段落间空行）或 `.jsonl`。
+
 ---
 
 ## 参数与档位
@@ -286,6 +304,7 @@ python code\train_llm.py data_path=src\我的语料.txt out_path=model\我的模
 | `small`（默认） | 4 | 4 | 128 | 128 | 32 | ~0.8 M | < 1 G | 能看出效果 |
 | `medium` | 6 | 6 | 384 | 256 | 64 | ~10 M | ~2–3 G | 语料够大时明显更好 |
 | `large` | 8 | 8 | 512 | 256 | 32 | ~25 M | ~6–7 G | 8 G 显存的上限附近，别再往上 |
+| `dlqq_0.1b` 配置 | 12 | 12 | 768 | 512 | 8 | **~91 M** | **~2.6 G** | 长训练专用，见下节 |
 
 所有配置项都能在命令行覆盖：
 
@@ -312,6 +331,106 @@ python code\train_llm.py n_layer=6 n_embd=384 lr=1e-3 max_iters=5000
 | `data_format` | `auto` | `auto` / `txt` / `jsonl`；auto 看扩展名和文件开头 |
 | `q_field` | 空 | jsonl 里「问」的字段名；留空自动推断 |
 | `a_field` | 空 | jsonl 里「答」的字段名；留空自动推断 |
+| `eval_iters` | 50 | 每次评估跑几批；长训练建议调到 20 省时间 |
+| `grad_accum` | 1 | 梯度累积：显存不够时用它凑等效 batch |
+| `warmup_iters` | 0 | 学习率预热步数，长训练建议 1000–2000 |
+| `lr_decay` | `cosine` | `cosine` 余弦退火 / `none` 恒定 |
+| `min_lr_frac` | 0.1 | 退火终点 = `lr × 这个比例` |
+| `grad_checkpoint` | `False` | 梯度检查点：省显存，慢约 20–30% |
+| `resume` | `False` | 从 `out_path` 接着训（要里面存过 optimizer/iter） |
+| `save_every` | 0 | 每 N 步强制存档（0 = 只在验证变好时存） |
+
+---
+
+## 训练 0.1B（长训练）
+
+`properties\dlqq_0.1b.properties` 是给 8 GB 显卡准备的长训练配置：
+
+```bat
+script\train.bat dlqq_0.1b
+```
+
+实测（RTX 4060 Laptop 8 GB，block 512，累积 8）：
+
+| 指标 | 数值 |
+|---|---|
+| 参数量 | **91.57 M**（约 0.1B） |
+| 每步 token | 8 × 512 × 8 = **32768** |
+| 训练速度 | **1.8–2 万 token/秒**（约 1.8 秒/步） |
+| 显存占用 | 约 **2.6 GB**（加系统占用总共 4.6 GB，8 G 有富余） |
+| 1.2B token | 约 **18 小时** |
+| 1.5B token | 约 **23 小时** |
+
+长训练两个关键点：
+
+**1. 中断后能接着训**。配置里把 `resume` 改成 `true` 再跑同一个配置即可：
+
+```properties
+resume=true
+```
+
+启动时会打印 `[续训] 从 … 的第 N 步接着训`，优化器状态和学习率进度都接得上。
+
+**2. 定期存档**。`save_every=2000` 表示每 2000 步强制存一次，防止「验证损失一直没变好 → 一直不存盘」的情况。
+
+---
+
+## 做一个小体积的答题 demo
+
+仓库体积有限（Gitee 单文件 50 MB），原来那份 5 K 字的演示语料互动性很弱。
+`chat_demo` 现在用**考题库**当语料：同样体积下信息密度高得多，demo 立刻变得能玩。
+
+两步：
+
+```bat
+REM 1) 下载考题（魔搭：C-Eval + 高考 + 生物），
+REM    直接写成 demo 语料 src\chat_demo.jsonl
+script\fetch_exam_data.bat
+
+REM 2) 训练 + 聊天（配置就是原来的 chat_demo，没有新增配置）
+script\train.bat chat_demo
+script\chat.bat
+```
+
+体积控制在 50 MB 以内的关键是 `properties\chat_demo.properties` 里这两行：
+
+```properties
+save_dtype=fp16        # 权重存半精度，体积减半
+save_optimizer=false   # 不存优化器状态，再省一半（demo 不需要续训）
+```
+
+实测：3.24 M 参数，fp32 + 优化器 31 MB → fp16 无优化器 **6.2 MB**；
+10.76 M 参数（6 层 384 维，小词表）→ **20.6 MB**。按这个比例，13.7 M 参数的
+demo 模型约 **27 MB**，塞进 50 MB 没问题。
+
+> **⚠ 数据来源要写明**：demo 把题库全部用于训练，模型是**记住了这些题**，
+> 所以要标注语料来源（魔搭上的 C-Eval / gaokao-benchmark 等），
+> 并且**不要**把同一批题当 benchmark 报分数 —— 那是自问自答，不是能力。
+
+### 语料从哪来（全部走魔搭，国内直连）
+
+| 数据集（魔搭仓库） | 规模 | 用途 |
+|---|---|---|
+| `philexohf/LLM-Pretrain-Data` | 约 24.6 GB / 49.6 亿 token | **预训练首选**：网页 55% + 新闻 27% + 维基 12% + 百科 6%，已清洗去重，txt 每行一篇 |
+| `AI-ModelScope/chinese-fineweb-edu` | 约 290 GB | 只要网页语料时取子集 |
+| `OmniData/C-Eval` | 1.5 MB | 52 学科选择题 |
+| `opencompass/gaokao-benchmark` | 5.7 MB | 高考选择题 |
+| `pandayi/Biology_subject_of_college_entrance_examination` | 0.2 MB | 高考生物（含解析） |
+| `SHPDataGR/medical-exam-question-bank-json` | 35 MB | 医学考试题库 |
+| `tongyi_dianjin/CFLUE` | 66 MB | 金融资格考试选择题 |
+
+下载方式：
+
+```bat
+REM 考题：用自带脚本，直连魔搭，不需要 GitHub / HuggingFace / 登录
+script\fetch_exam_data.bat --datasets c-eval gaokao bio
+
+REM 大语料：装一次 modelscope，然后一条命令
+python -m pip install modelscope
+modelscope download --dataset philexohf/LLM-Pretrain-Data --local_dir ai_res\doc\pretrain
+```
+
+24.6 GB 不用全下——`ai_res\doc\pretrain` 里按文件挑，凑够 3–4 GB 就够 0.1B 用了。
 
 ---
 
@@ -374,8 +493,8 @@ python code\train_llm.py data_path=src\dlqq_llm.jsonl out_path=model\dlqq_llm.pt
 
 - 每份语料（连同 `max_vocab` / `val_frac` / 格式 / 字段这些设置）对应一个独立缓存文件
   `ai_res\cache\data-<指纹>.bin`，改任何一项都会自动写一份新的。
-  所以 demo 的 `chat_demo.txt` 和 GB 级的 `dlqq_llm.jsonl` 可以**同时留着**，
-  来回切换不用重新切词（实测切回 txt 只要 5 秒）；想全部重来就删 `ai_res\cache\`；
+  所以 demo 的 `chat_demo.jsonl` 和 GB 级的 `dlqq_llm.jsonl` 可以**同时留着**，
+  来回切换不用重新切词；想全部重来就删 `ai_res\cache\`；
 - 验证集是从**语料尾部**切的。语料若按类别顺序排列（比如前半新闻、后半对话），
   建议先打乱行序，否则验证损失反映不了真实水平。
 
@@ -413,22 +532,25 @@ code/                     训练与对话脚本
 script/                   入口脚本（双击即用）
   train.bat               训练（列出 properties\ 里的配置让你选）
   chat.bat                进入对话
+  fetch_exam_data.bat     下载考题库、生成 demo 语料（魔搭，国内直连）
   torch_check.bat         环境自检
   http_server.bat         启动桥接服务（供 DSH 接入）
   train_chat_helper.py    上面几个 bat 的交互逻辑
+  fetch_exam_data.py      考题下载与格式转换
   torch_check.py          自检的具体检查项
   http_server.py          桥接服务本体（OpenAI 兼容，独立自足）
 
 properties/               训练配置（一行一个 key=value，改完即生效）
-  chat_demo.properties    演示语料 + small 档
+  chat_demo.properties    demo 配置（13.7 M 参数，语料来自 script\fetch_exam_data.bat）
+  dlqq_0.1b.properties    0.1B 长训练（91 M 参数，约 18 小时）
   dlqq_llm.properties     GB 级语料 + large 档
 
 ai_res/                   临时目录，放辅助脚本与中间产物，**已被 .gitignore 忽略**
   cache/                  切词缓存（每份语料一个 data-<指纹>.bin）
-  doc/                    原始语料
+  doc/                    原始语料 / 下载的题库
   script/                 辅助工具：语料导出、PDF 转换、出图、跑分等
 
-src/                      语料（自带 chat_demo.txt）
+src/                      语料（chat_demo.jsonl 由 script\fetch_exam_data.bat 生成）
 model/                    训练产出的 .pt（默认输出目录）
 release/                  打包输出目录
 ```
@@ -469,7 +591,7 @@ script\train.bat chat_demo
 
 不会。输入已存在的名称时会问你是否覆盖，回答 `n` 就可以换个名字。
 
-**Q：想训练但不想用 `chat_demo.txt`？**
+**Q：想训练但不想用 `chat_demo.jsonl`？**
 
 复制一份配置改两行就行（`train.bat` 会自动列出新配置）：
 
@@ -487,7 +609,7 @@ model=我的模型
 直接调训练脚本，命令行覆盖会盖掉配置文件里的同名项：
 
 ```bat
-python code\train_llm.py data_path=src\chat_demo.txt out_path=model\chat_demo.pt max_iters=500
+python code\train_llm.py data_path=src\chat_demo.jsonl out_path=model\chat_demo.pt max_iters=500
 ```
 
 **Q：模型训练很久还是只会复读？**
@@ -508,32 +630,34 @@ python code\train_llm.py data_path=src\chat_demo.txt out_path=model\chat_demo.pt
 
 ### 第一步：启动桥接服务
 
-双击 `script\http_server.bat`，它会先让你**用键盘选一个模型**（和 `chat.bat` 一样）：
+双击 `script\http_server.bat` 就行 —— **不用选模型**。它会自动扫 `model\` 和 `release\`
+下的所有 `.pt`，启动时只列清单，**一个都不加载**：
 
 ```
-可用模型：
-  [1] model\chat_demo.pt          3.6 MB  ← 默认
-  [2] model\dlqq_llm.pt         117.9 MB  ← 刚被修改过，可能正在训练
-请输入编号或模型名（直接回车用默认模型）：
+[清单] 共 3 个模型（现在不加载，谁被调用才加载谁）
+       chat_demo                     3.6 MB  10-17 16:25  ← 默认
+       dlqq_llm                    117.9 MB  10-17 17:27
+       chat_demo_exam               27.0 MB  10-19 11:40
 ```
 
-（带「刚被修改过」标记的，说明训练正在写这个文件，等训练完再选它。）
+谁被 DSH 真正调用，才把谁读进显存；切到另一个模型时，上一个自动卸载
+（默认只留 1 个在显存里，可用 `--max-loaded` 调）。
 
 也可以直接用参数跳过提问：
 
 ```bat
-script\http_server.bat                      REM 列出模型让你选，监听 49128
-script\http_server.bat chat_demo            REM 直接指定模型
-script\http_server.bat chat_demo 9000       REM 换端口
-script\http_server.bat chat_demo 9000 cpu   REM 强制用 CPU 推理（不占显卡）
+script\http_server.bat                      REM 监听 49128，自动扫模型
+script\http_server.bat 9000                 REM 换端口
+script\http_server.bat 9000 cpu             REM 强制用 CPU 推理（不占显卡）
+script\http_server.bat 9000 cuda 2          REM 同时在显存里留 2 个模型
 python script\http_server.py --help         REM 看全部参数
 ```
 
-启动后窗口会打印接口地址与模型名：
+启动后窗口会打印接口地址与模型清单：
 
 ```
   接口     http://127.0.0.1:49128/v1
-  模型名   chat_demo（DSH 里填这个名字）
+  模型清单 http://127.0.0.1:49128/v1/models
   健康检查 http://127.0.0.1:49128/health
   停止服务：在这个窗口按 Ctrl+C
 ```
@@ -551,17 +675,25 @@ python script\http_server.py --help         REM 看全部参数
 | 基础 URL | `http://127.0.0.1:49128/v1` |
 | API 协议 | `openai-completions` |
 | 凭据 / API Key | `local`（本地服务不校验，但**这一栏不能留空**） |
-| 模型 | 点「获取可用模型」会自动拉到 `chat_demo`，也可以手动输入 |
+| 模型 | 点「获取可用模型」会列出 `model\` 里所有 `.pt`；**随便选，之后在模型选择器里随时切换** |
 
-保存后回到会话页，在模型选择器里选中 `chat_demo` 即可对话。
+模型 id 就是权重文件名（不含 `.pt`）。同名文件出现在不同目录时会加目录名区分，
+例如 `chat_demo@release`；请求里的 `model` 写 `chat_demo`、`chat_demo.pt`、
+`model/chat_demo.pt` 都能认（大小写不敏感）。
+
+保存后回到会话页，在模型选择器里换模型，服务端会自动加载对应权重。
 
 ### 服务实现了什么
 
 | 接口 | 说明 |
 |---|---|
-| `GET /v1/models` | 模型清单，DSH 的「获取可用模型」调它 |
-| `POST /v1/chat/completions` | 对话，**流式与非流式都支持** |
-| `GET /health` | 健康检查，返回模型名、设备、加载时间 |
+| `GET /v1/models` | 全部模型清单（只读文件名，不加载权重） |
+| `GET /v1/models/{id}` | 单个模型信息 |
+| `POST /v1/chat/completions` | 对话，**流式与非流式都支持**；按请求里的 `model` 选模型，首次用到才加载 |
+| `GET /health` | 健康检查，返回当前**已加载**的模型、设备、默认模型 |
+
+**懒加载**：`/v1/models`、`/health` 都不会把权重读进内存；只有对话请求到了，
+才 `torch.load` 对应的那个 `.pt`。切换时按 LRU 卸载旧模型并释放显存缓存。
 
 行为约定 —— **桥接层只做两件事，内容判断一律交给模型**：
 
@@ -582,7 +714,7 @@ python script\http_server.py --help         REM 看全部参数
 |---|---|
 | 不会调用工具 | 请求里带的工具定义会被忽略，模型只回文本；它不会读文件、不会跑命令 |
 | 上下文很短 | 默认档位只有 128 字元（`block_size`）。**DSH 一条 agent 消息通常有 2000 字以上**，所以模型实际只看到最后那一小段 |
-| 回答质量受限 | 演示模型只有 0.9 M 参数，训练自 4.9 K 字的 `chat_demo.txt`（754 个字），只能复述语料里的句子；想答通顺要换 `large` 档 + 大语料训几万步 |
+| 回答质量受限 | demo 模型约 13.7 M 参数，训练自考题库（魔搭：C-Eval / 高考 / 生物），**能答题库里的题，但换个问法就露馅**；它没有推理能力，只是把语料背下来了 |
 | 不是 agent 模型 | 它只会接着你的话往下写，不会规划、不会分步执行任务 |
 
 > 结论：**接进 DSH 用来验证链路 —— 请求发得出、模型收得到、回答回得来 —— 是完全可行的**。

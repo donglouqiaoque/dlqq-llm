@@ -13,7 +13,7 @@
     python code\\train_llm.py max_iters=500 n_layer=2 n_embd=64  # 命令行覆盖任意配置
 
 用工程自带的演示语料（这是 script\\train.bat 实际执行的命令）：
-    python code\\train_llm.py data_path=src\\chat_demo.txt out_path=model\\chat_demo.pt max_iters=3000
+    python code\\train_llm.py data_path=src\\chat_demo.jsonl out_path=model\\chat_demo.pt max_iters=3000
 
 吃一整份大语料（txt 或 jsonl 都行，第一次运行会先花些时间切词，之后自动复用 cache）：
     python code\\train_llm.py data_path=ai_res\\doc\\firefly-train-1.1M.jsonl out_path=model\\firefly.pt ^
@@ -72,6 +72,16 @@ CONFIG = dict(
     data_format = "auto",    # auto / txt / jsonl；auto 按扩展名和文件开头判断
     q_field     = "",        # jsonl 里「问」的字段名；留空自动推断
     a_field     = "",        # jsonl 里「答」的字段名；留空自动推断
+    # ---- 训练调度（长训练必需）----
+    grad_accum      = 1,        # 梯度累积步数：显存不够时用它凑等效 batch
+    warmup_iters    = 0,        # 学习率线性预热多少步
+    lr_decay        = "cosine", # cosine = 余弦退火到 min_lr_frac；none = 恒定
+    min_lr_frac     = 0.1,      # 退火终点 = lr * 这个比例
+    grad_checkpoint = False,    # 梯度检查点：省显存，慢约 20-30%
+    resume          = False,    # True = 从 out_path 续训（要有 optimizer/iter）
+    save_every      = 0,        # 每 N 步强制存一次盘（0 = 只在验证变好时存）
+    save_dtype      = "fp32",   # fp32 / fp16 / bf16 —— 发到 Gitee 时用 fp16 体积减半
+    save_optimizer  = True,     # 存优化器状态（续训要用）；发出去的 demo 可以关掉省一半体积
 )
 
 # ------------------------------------------------------------------
@@ -94,10 +104,14 @@ def apply_cli_overrides():
         if k not in CONFIG:
             print(f"[警告] 未知配置项 {k}，忽略"); continue
         cur = CONFIG[k]
-        try:
-            v2 = int(v) if isinstance(cur, int) else float(v) if isinstance(cur, float) else v
-        except ValueError:
-            v2 = v
+        if isinstance(cur, bool):
+            # 布尔项必须显式识别，否则 "False" 也会被当成真
+            v2 = v.strip().lower() in ("1", "true", "yes", "y", "on")
+        else:
+            try:
+                v2 = int(v) if isinstance(cur, int) else float(v) if isinstance(cur, float) else v
+            except ValueError:
+                v2 = v
         CONFIG[k] = v2
         print(f"[覆盖] {k} = {v2}")
 
@@ -502,13 +516,15 @@ class Block(nn.Module):
         return x
 
 class GPT(nn.Module):
-    def __init__(self, vocab, block_size, n_layer, n_head, n_embd, dropout):
+    def __init__(self, vocab, block_size, n_layer, n_head, n_embd, dropout,
+                 grad_checkpoint=False):
         super().__init__()
         self.block_size = block_size
+        self.grad_checkpoint = grad_checkpoint
         self.tok_emb = nn.Embedding(vocab, n_embd)
         self.pos_emb = nn.Embedding(block_size, n_embd)
         self.drop = nn.Dropout(dropout)
-        self.blocks = nn.Sequential(*[Block(n_embd, n_head, dropout) for _ in range(n_layer)])
+        self.blocks = nn.ModuleList([Block(n_embd, n_head, dropout) for _ in range(n_layer)])
         self.ln_f = nn.LayerNorm(n_embd)
         self.head = nn.Linear(n_embd, vocab, bias=False)
         self.head.weight = self.tok_emb.weight        # 权重共享，省参数
@@ -524,7 +540,12 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None):
         B, T = idx.shape
         x = self.drop(self.tok_emb(idx) + self.pos_emb(torch.arange(T, device=idx.device)))
-        x = self.blocks(x)
+        for blk in self.blocks:
+            if self.grad_checkpoint and self.training:
+                # 不存中间激活，反向时重算 —— 省显存，慢一点
+                x = torch.utils.checkpoint.checkpoint(blk, x, use_reentrant=False)
+            else:
+                x = blk(x)
         logits = self.head(self.ln_f(x))              # (B,T,V)
         loss = None
         if targets is not None:
@@ -545,7 +566,8 @@ class GPT(nn.Module):
         return idx
 
 model = GPT(VOCAB, CONFIG["block_size"], CONFIG["n_layer"],
-            CONFIG["n_head"], CONFIG["n_embd"], CONFIG["dropout"]).to(DEVICE)
+            CONFIG["n_head"], CONFIG["n_embd"], CONFIG["dropout"],
+            grad_checkpoint=bool(CONFIG["grad_checkpoint"])).to(DEVICE)
 n_params = sum(p.numel() for p in model.parameters())
 print(f"[模型] 参数量 {n_params/1e6:.2f} M")
 
@@ -558,6 +580,22 @@ for p in model.parameters():
     (decay if p.dim() >= 2 else no_decay).append(p)
 opt = torch.optim.AdamW([{"params": decay,    "weight_decay": CONFIG["weight_decay"]},
                          {"params": no_decay, "weight_decay": 0.0}], lr=CONFIG["lr"])
+
+# ------------------------------------------------------------------
+# 学习率调度：线性预热 → 余弦退火
+# ------------------------------------------------------------------
+def lr_at(it):
+    base = CONFIG["lr"]
+    warm = int(CONFIG["warmup_iters"])
+    total = max(1, int(CONFIG["max_iters"]))
+    if warm > 0 and it < warm:
+        return base * (it + 1) / warm
+    if CONFIG["lr_decay"] != "cosine":
+        return base
+    min_lr = base * float(CONFIG["min_lr_frac"])
+    span = max(1, total - warm)
+    t = min(1.0, max(0.0, (it - warm) / span))
+    return min_lr + 0.5 * (base - min_lr) * (1.0 + math.cos(math.pi * t))
 
 @torch.no_grad()
 def estimate_loss():
@@ -574,7 +612,7 @@ def estimate_loss():
     return out
 
 # ==================================================================
-# 4) 训练循环
+# 4) 训练循环（梯度累积 + 学习率调度 + 断点续训）
 # ==================================================================
 print("[训练] 开始")
 # 输出目录不存在就先建出来，否则 torch.save 会在中途报错
@@ -582,28 +620,81 @@ _out_dir = os.path.dirname(os.path.abspath(CONFIG["out_path"]))
 if _out_dir:
     os.makedirs(_out_dir, exist_ok=True)
 
+def save_ckpt(it, best):
+    """完整存档：模型 + 优化器 + 进度，续训时能接上。
+    save_dtype 可以只把「权重」转成半精度存，体积减半（优化器状态仍是 fp32）。"""
+    sd = model.state_dict()
+    dt = str(CONFIG.get("save_dtype", "fp32")).lower()
+    if dt in ("fp16", "half"):
+        sd = {k: (v.half() if v.is_floating_point() else v) for k, v in sd.items()}
+    elif dt in ("bf16", "bfloat16"):
+        sd = {k: (v.bfloat16() if v.is_floating_point() else v) for k, v in sd.items()}
+    payload = {"model": sd, "config": CONFIG, "chars": chars,
+               "iter": it, "best_val": best}
+    if CONFIG.get("save_optimizer", True):
+        payload["optimizer"] = opt.state_dict()
+    torch.save(payload, CONFIG["out_path"])
+
 best_val = float("inf")
+start_it = 0
 saved = False
+
+if CONFIG["resume"] and os.path.isfile(CONFIG["out_path"]):
+    try:
+        _ck = torch.load(CONFIG["out_path"], map_location=DEVICE, weights_only=False)
+        model.load_state_dict(_ck["model"])
+        if "optimizer" in _ck:
+            opt.load_state_dict(_ck["optimizer"])
+        start_it = int(_ck.get("iter", 0)) + 1
+        best_val = float(_ck.get("best_val", float("inf")))
+        saved = True
+        print(f"[续训] 从 {CONFIG['out_path']} 的第 {start_it} 步接着训"
+              f"（最好验证损失 {best_val:.4f}）")
+    except Exception as e:
+        print(f"[续训] 读取失败，改为从头训：{e}")
+
+accum = max(1, int(CONFIG["grad_accum"]))
+tokens_per_step = CONFIG["batch_size"] * CONFIG["block_size"] * accum
+print(f"[训练] 每步 {tokens_per_step} token"
+      f"（batch {CONFIG['batch_size']} × {CONFIG['block_size']} 字 × 累积 {accum}）")
+if CONFIG["lr_decay"] == "cosine":
+    print(f"[训练] 学习率 {CONFIG['lr']:.1e} → {CONFIG['lr']*CONFIG['min_lr_frac']:.1e}"
+          f"（余弦退火，预热 {CONFIG['warmup_iters']} 步）")
+
 t0 = time.time()
-for it in range(CONFIG["max_iters"] + 1):
+tokens_done = 0
+for it in range(start_it, CONFIG["max_iters"] + 1):
+    lr = lr_at(it)
+    for g in opt.param_groups:
+        g["lr"] = lr
+
     if it % CONFIG["eval_interval"] == 0:
         L = estimate_loss()
+        elapsed = time.time() - t0
+        speed = tokens_done / elapsed if elapsed > 0 else 0
         mark = ""
         if L["val"] < best_val:
             best_val = L["val"]
-            torch.save({"model": model.state_dict(), "config": CONFIG,
-                        "chars": chars}, CONFIG["out_path"])
+            save_ckpt(it, best_val)
             saved = True
             mark = "  ← 已保存"
-        print(f"  step {it:>5} | train {L['train']:.4f} | val {L['val']:.4f}"
-              f" | 困惑度 {math.exp(L['val']):>7.1f} | {time.time()-t0:>6.1f}s{mark}")
-    xb, yb = get_batch("train")
-    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=USE_AMP):
-        _, loss = model(xb, yb)
+        print(f"  step {it:>6} | train {L['train']:.4f} | val {L['val']:.4f}"
+              f" | 困惑度 {math.exp(L['val']):>7.1f} | {elapsed:>7.1f}s"
+              f" | {speed:>6.0f} tok/s | lr {lr:.1e}{mark}")
+
     opt.zero_grad(set_to_none=True)
-    loss.backward()
+    for _ in range(accum):
+        xb, yb = get_batch("train")
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=USE_AMP):
+            _, loss = model(xb, yb)
+        (loss / accum).backward()          # 累积：每个微批的梯度只贡献 1/accum
     torch.nn.utils.clip_grad_norm_(model.parameters(), CONFIG["grad_clip"])
     opt.step()
+    tokens_done += tokens_per_step
+
+    if CONFIG["save_every"] and it > 0 and it % CONFIG["save_every"] == 0:
+        save_ckpt(it, best_val)
+        print(f"  step {it:>6} | 定时存档")
 
 print(f"[训练] 完成，用时 {time.time()-t0:.1f}s，最好验证损失 {best_val:.4f}")
 

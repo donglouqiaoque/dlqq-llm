@@ -36,6 +36,7 @@ import time
 import uuid
 import argparse
 import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 for _s in ("stdout", "stderr"):
@@ -196,9 +197,7 @@ def load_model(path, device=None):
             return self.head(self.ln_f(self.blocks(x)))
 
     if not os.path.isfile(path):
-        print(f"[错误] 找不到模型：{path}")
-        print("       先训练一个：python code/train_llm.py data_path=src/chat_demo.txt out_path=model/chat_demo.pt")
-        sys.exit(1)
+        raise RuntimeError(f"找不到模型文件：{path}")
 
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     C, chars = ckpt["config"], ckpt["chars"]
@@ -324,6 +323,128 @@ def _clean_reply(text):
 
 
 # ==================================================================
+# 模型清单 + 懒加载池
+# ==================================================================
+def scan_models(dirs):
+    """扫目录里的 .pt 权重，模型 id 用文件名（不含扩展名）。
+    同名文件出现在多个目录时，加 @目录名 区分，例如 chat_demo@release。"""
+    found = {}
+    for d in dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for fn in names:
+            if not fn.lower().endswith(".pt"):
+                continue
+            path = os.path.join(d, fn)
+            if not os.path.isfile(path):
+                continue
+            base = os.path.splitext(fn)[0]
+            mid = base
+            if mid in found:
+                mid = f"{base}@{os.path.basename(d.rstrip(os.sep))}"
+            k = 2
+            while mid in found:
+                mid = f"{base}@{os.path.basename(d.rstrip(os.sep))}-{k}"
+                k += 1
+            found[mid] = path
+    return found
+
+
+class ModelPool:
+    """按需加载：/v1/models 只列文件名，不动显存；
+    真正有对话请求进来才 torch.load，并做 LRU 淘汰（默认只留一个在显存里）。"""
+
+    def __init__(self, registry, device, max_loaded=1, extra_args=None):
+        self.registry = dict(registry)
+        self.device = device
+        self.max_loaded = max(1, int(max_loaded))
+        self.args = extra_args
+        self.lock = threading.Lock()
+        self.loaded = {}          # id -> Engine
+        self.order = []           # LRU，最近用的在末尾
+        self.hits = {}            # id -> 调用次数
+
+    # ---- 清单 ----
+    def ids(self):
+        return sorted(self.registry)
+
+    def path_of(self, mid):
+        return self.registry.get(mid)
+
+    def resolve(self, mid):
+        """把请求里的 model 字段解析成 registry 里的 id。
+        支持：完整 id、去扩展名的文件名、文件路径；大小写不敏感。"""
+        if not mid:
+            return None
+        mid = str(mid).strip()
+        if mid in self.registry:
+            return mid
+        base = os.path.splitext(os.path.basename(mid))[0]
+        low = base.lower()
+        for k in self.registry:
+            if k == base or k.split("@")[0] == base:
+                return k
+        for k in self.registry:
+            if k.lower() == base.lower() or k.split("@")[0].lower() == low:
+                return k
+        return None
+
+    # ---- 加载 / 淘汰 ----
+    def get(self, mid):
+        with self.lock:
+            eng = self.loaded.get(mid)
+            if eng is not None:
+                self.order.remove(mid)
+                self.order.append(mid)
+                self.hits[mid] = self.hits.get(mid, 0) + 1
+                return eng
+
+            path = self.registry.get(mid)
+            if not path:
+                raise KeyError(mid)
+
+            # 先腾地方：超出上限就把最久没用的卸掉
+            while len(self.loaded) >= self.max_loaded and self.order:
+                old = self.order.pop(0)
+                print(f"[卸载] {old}（显存/内存留给 {mid}）", flush=True)
+                self.loaded.pop(old, None)
+                _free_memory()
+
+            print(f"[加载] {mid} ← {path}", flush=True)
+            t0 = time.time()
+            eng = Engine(path, self.device)
+            print(f"[加载] {mid} 完成：词表 {len(eng.chars)} | 上下文 {eng.block} 字 | "
+                  f"{time.time() - t0:.1f}s", flush=True)
+            self.loaded[mid] = eng
+            self.order.append(mid)
+            self.hits[mid] = self.hits.get(mid, 0) + 1
+            return eng
+
+    def status(self):
+        return {
+            "loaded": [{"id": m, "loaded_at": self.loaded[m].loaded,
+                        "calls": self.hits.get(m, 0)} for m in self.order],
+            "available": len(self.registry),
+        }
+
+
+def _free_memory():
+    """卸模型后把缓存还给系统，避免下一个模型 OOM"""
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+# ==================================================================
 # HTTP
 # ==================================================================
 class Handler(BaseHTTPRequestHandler):
@@ -357,15 +478,31 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0].rstrip("/") or "/"
         if path in ("/health", "/"):
-            self._send(200, {"status": "ok", "model": ENG.args.served_name,
-                             "device": ENG.device, "loaded": ENG.loaded})
+            st = POOL.status()
+            self._send(200, {"status": "ok", "models": st["available"],
+                             "loaded": [x["id"] for x in st["loaded"]],
+                             "device": POOL.device,
+                             "default": ARGS.default_model})
         elif path == "/v1/models":
-            self._send(200, {"object": "list", "data": [{
-                "id": ENG.args.served_name,
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "local",
-            }]})
+            data = []
+            for mid in POOL.ids():
+                p = POOL.path_of(mid)
+                try:
+                    created = int(os.path.getmtime(p))
+                except OSError:
+                    created = int(time.time())
+                data.append({"id": mid, "object": "model", "created": created,
+                             "owned_by": "local"})
+            self._send(200, {"object": "list", "data": data})
+        elif path.startswith("/v1/models/"):
+            mid = path[len("/v1/models/"):]
+            real = POOL.resolve(urllib.parse.unquote(mid))
+            if not real:
+                self._err(404, f"没有这个模型：{mid}", "model_not_found", "model")
+                return
+            p = POOL.path_of(real)
+            self._send(200, {"id": real, "object": "model",
+                             "created": int(os.path.getmtime(p)), "owned_by": "local"})
         else:
             self._err(404, f"unknown path: {self.path}", "not_found")
 
@@ -387,42 +524,57 @@ class Handler(BaseHTTPRequestHandler):
         # DSH 是 agent 框架，请求里默认会带 tools；而界面里没有「关掉工具」的开关。
         # 所以这里**不能报错**，只能忽略 tools 字段，回一段普通文本、不返回 tool_calls。
         # 想恢复「直接拒绝」的行为，启动时加 --reject-tools。
+        global WARNED_TOOLS
         if req.get("tools") or req.get("tool_choice") or req.get("functions"):
-            if ENG.args.reject_tools:
+            if ARGS.reject_tools:
                 self._err(400,
                           "本模型不支持工具调用（tools / tool_choice / functions）",
                           "unsupported_feature", "tools")
                 return
-            if not ENG.warned_tools:
-                ENG.warned_tools = True
+            if not WARNED_TOOLS:
+                WARNED_TOOLS = True
                 n_tools = len(req.get("tools") or [])
                 print(f"  [提示] 本请求带了 {n_tools} 个工具定义，已忽略 —— "
                       f"服务只会返回普通文本，不会返回 tool_calls", flush=True)
 
-        model_id = req.get("model") or ENG.args.served_name
-        prompt, turns = ENG.build_prompt(req.get("messages"))
+        # ---- 按请求里的 model 选模型；第一次用到才加载 ----
+        want = req.get("model") or ARGS.default_model
+        mid = POOL.resolve(want)
+        if not mid:
+            avail = ", ".join(POOL.ids()) or "(没有任何 .pt)"
+            self._err(404, f"没有这个模型：{want}（可用：{avail}）",
+                      "model_not_found", "model")
+            return
+        try:
+            eng = POOL.get(mid)
+        except Exception as e:
+            self._err(500, f"加载模型 {mid} 失败：{e}", "model_load_error", "model")
+            return
+
+        model_id = mid
+        prompt, turns = eng.build_prompt(req.get("messages"))
         if not prompt:
             self._err(400, "messages 里没有可用的用户消息", param="messages")
             return
 
-        if ENG.args.debug:
+        if ARGS.debug:
             self._dump_debug(req, prompt, turns)
 
         temperature = req.get("temperature")
-        temperature = ENG.args.temperature if temperature is None else float(temperature)
+        temperature = ARGS.temperature if temperature is None else float(temperature)
         top_k = req.get("top_k")
-        top_k = ENG.args.top_k if top_k is None else int(top_k)
-        max_chars = req.get("max_tokens") or req.get("max_completion_tokens") or ENG.args.max_chars
+        top_k = ARGS.top_k if top_k is None else int(top_k)
+        max_chars = req.get("max_tokens") or req.get("max_completion_tokens") or ARGS.max_chars
         # 字符级模型：把「token 数」当成字符数，并夹在合理区间里
-        max_chars = max(1, min(int(max_chars), ENG.args.max_chars_cap))
+        max_chars = max(1, min(int(max_chars), ARGS.max_chars_cap))
 
         t0 = time.time()
-        text = ENG.generate(prompt, max_chars, temperature, top_k,
-                            stop_on_user=not ENG.args.no_stop_on_user)
+        text = eng.generate(prompt, max_chars, temperature, top_k,
+                            stop_on_user=not ARGS.no_stop_on_user)
         dt = time.time() - t0
         cid = "chatcmpl-" + uuid.uuid4().hex[:24]
         created = int(time.time())
-        print(f"  → 轮数 {turns} | 提示 {len(prompt)} 字 | 生成 {len(text)} 字 | {dt:.2f}s", flush=True)
+        print(f"  → [{model_id}] 轮数 {turns} | 提示 {len(prompt)} 字 | 生成 {len(text)} 字 | {dt:.2f}s", flush=True)
 
         if req.get("stream"):
             self.send_response(200)
@@ -490,15 +642,24 @@ class Handler(BaseHTTPRequestHandler):
         print("  └────────────────────────────────────────────────", flush=True)
 
 
-ENG = None
+ARGS = None
+POOL = None
+WARNED_TOOLS = False
 
 
 def main():
-    global ENG
-    ap = argparse.ArgumentParser(description="把训练好的模型起成 OpenAI 兼容服务")
-    ap.add_argument("--model", default=DEFAULT_MODEL, help="模型 .pt 路径")
+    global ARGS, POOL
+    ap = argparse.ArgumentParser(description="把训练好的模型起成 OpenAI 兼容服务（支持多模型）")
+    ap.add_argument("--model", action="append", default=[],
+                    help="额外指定 .pt 文件（可写多次）；默认自动扫 model\\ 和 release\\")
+    ap.add_argument("--model-dir", action="append", default=[],
+                    help="额外的模型目录（可写多次）")
+    ap.add_argument("--default-model", default=None,
+                    help="请求没带 model 时用哪个；默认清单里第一个")
     ap.add_argument("--served-name", default=None,
-                    help="对外暴露的模型名，默认用 .pt 文件名（不含扩展名）")
+                    help="给 --model 指定的那个文件起个别名（兼容旧用法）")
+    ap.add_argument("--max-loaded", type=int, default=1,
+                    help="同时留在显存里的模型数，默认 1（切模型就卸载上一个）")
     ap.add_argument("--host", default="127.0.0.1", help="监听地址，默认只绑本机")
     ap.add_argument("--port", type=int, default=49128, help="监听端口，默认 49128")
     ap.add_argument("--device", default=None, choices=["cpu", "cuda"],
@@ -515,30 +676,74 @@ def main():
     ap.add_argument("--debug", action="store_true",
                     help="把客户端发来的消息与拼出的提示词打印出来（排查用）")
     a = ap.parse_args()
-    a.model = os.path.abspath(a.model)
-    if not a.served_name:
-        a.served_name = os.path.splitext(os.path.basename(a.model))[0]
 
-    print("=" * 62)
-    print("  桥接服务：本地模型（OpenAI 兼容）")
-    print("=" * 62)
-    t0 = time.time()
-    ENG = Engine(a.model, a.device)
-    ENG.args = a
-    print(f"[模型] {a.model}")
-    print(f"[名称] {a.served_name} | 词表 {len(ENG.chars)} | 上下文 {ENG.block} 字 | 设备 {ENG.device}")
-    print(f"[加载] 用时 {time.time() - t0:.1f}s")
-    print(f"[模式] {'GPU' if ENG.device == 'cuda' else 'CPU'} —— "
-          f"{'单次生成独占推理锁' if ENG.device == 'cuda' else 'CPU 推理，速度较慢'}")
-    print("[工具] " + ("带 tools 的请求直接返回 400（--reject-tools）"
+    # ---- 收集模型清单 ----
+    dirs = [os.path.join(ROOT, "model"), os.path.join(ROOT, "release")]
+    dirs += [os.path.abspath(d) for d in (a.model_dir or [])]
+    reg = scan_models(dirs)
+    for p in (a.model or []):
+        p = os.path.abspath(p)
+        if not os.path.isfile(p):
+            print(f"[错误] --model 指的文件不存在：{p}")
+            sys.exit(1)
+        base = os.path.splitext(os.path.basename(p))[0]
+        mid = a.served_name if (a.served_name and len(a.model) == 1) else base
+        k = 2
+        while mid in reg and reg[mid] != p:
+            mid = f"{base}-{k}"
+            k += 1
+        reg[mid] = p
+
+    if not reg:
+        print("[错误] 一个 .pt 都没找到。")
+        print(f"       扫过的目录：{', '.join(dirs)}")
+        print("       先训练一个：script\\train.bat，或把权重放进 model\\")
+        sys.exit(1)
+
+    ids = sorted(reg)
+    default = a.default_model or ids[0]
+    if default not in reg:
+        base = os.path.splitext(os.path.basename(default))[0]
+        hit = [k for k in ids if k == base or k.split("@")[0] == base]
+        if not hit:
+            print(f"[错误] --default-model 不在清单里：{default}（可用：{', '.join(ids)}）")
+            sys.exit(1)
+        default = hit[0]
+    a.default_model = default
+
+    if a.device is None:
+        try:
+            import torch
+            a.device = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            a.device = "cpu"
+
+    ARGS = a
+    POOL = ModelPool(reg, a.device, a.max_loaded, a)
+
+    print("=" * 68)
+    print("  桥接服务：本地模型（OpenAI 兼容，多模型 + 懒加载）")
+    print("=" * 68)
+    print(f"[清单] 共 {len(ids)} 个模型（现在不加载，谁被调用才加载谁）")
+    for mid in ids:
+        p = reg[mid]
+        try:
+            mb = os.path.getsize(p) / 1e6
+            mt = time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(p)))
+        except OSError:
+            mb, mt = 0, "?"
+        mark = "  ← 默认" if mid == default else ""
+        print(f"       {mid:<24} {mb:>8.1f} MB  {mt}{mark}")
+    print(f"[设备] {a.device} | 同时最多留 {a.max_loaded} 个模型在显存里")
+    print(f"[工具] " + ("带 tools 的请求直接返回 400（--reject-tools）"
                        if a.reject_tools else
                        "忽略请求里的 tools，只回普通文本，不返回 tool_calls"))
     print()
     print(f"  接口     http://{a.host}:{a.port}/v1")
-    print(f"  模型名   {a.served_name}（DSH 里填这个名字）")
+    print(f"  模型清单 http://{a.host}:{a.port}/v1/models")
     print(f"  健康检查 http://{a.host}:{a.port}/health")
     print("  停止服务：在这个窗口按 Ctrl+C")
-    print("=" * 62)
+    print("=" * 68)
 
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     srv.daemon_threads = True
