@@ -10,3 +10,6 @@ properties/*
 
 !chat_demo*
 #!dlqq_llm* # 文件太大Gitee不让上传
+
+script/dlqq-llm.lnk
+script/logo.ico

@@ -42,7 +42,7 @@
 想先确认环境是否装好，双击 `script\torch_check.bat`，它会逐项检查并在最后给出结论。
 
 > 自带两个配置：`chat_demo.properties`（考题库 demo，13.7 M 参数，几分钟）和
-> `dlqq_llm.properties`（`src\dlqq_llm.jsonl`，GB 级语料）。对话默认用 `model\chat_demo.pt`。
+> `dlqq_llm.properties`（`src\dlqq_llm\` 目录，GB 级语料）。对话默认用 `model\chat_demo\chat_demo.pt`。
 > **语料或模型缺失时会直接终止**，并提示你怎么补上。
 
 ---
@@ -130,8 +130,7 @@ python=D:\Soft\Python\Python3_13_9\python.exe
 ```
 Available configs:
   [1] chat_demo.properties
-  [2] dlqq_0.1b.properties
-  [3] dlqq_llm.properties
+  [2] dlqq_llm.properties
 
 Select a number (Enter = 1): 1
 ```
@@ -143,8 +142,8 @@ Select a number (Enter = 1): 1
 [python]  D:\Soft\Python\Python3_13_9\python.exe
 
   训练（配置文件：chat_demo.properties）
-[语料] src\chat_demo.jsonl
-[输出] model\chat_demo.pt
+[语料] src\chat_demo（目录，1 个文件）
+[输出] model\chat_demo\chat_demo.pt
 [参数] n_layer=6 n_head=6 n_embd=384 block_size=256 batch_size=32 max_iters=3000 ...
 [环境] D:\Soft\Python\Python3_13_9\python.EXE
 ```
@@ -157,16 +156,15 @@ Select a number (Enter = 1): 1
 
 | 文件 | 语料 | 档位 | 说明 |
 |---|---|---|---|
-| `chat_demo.properties` | `src\chat_demo.jsonl` | medium（13.7 M 参数） | 考题库 demo，几分钟 |
-| `dlqq_0.1b.properties` | `src\dlqq_llm.jsonl` | 12 层 768 维（91 M） | 0.1B 长训练，约 18 小时 |
-| `dlqq_llm.properties` | `src\dlqq_llm.jsonl` | large（33 M 参数） | GB 级语料，约 1 小时 |
+| `chat_demo.properties` | `src\chat_demo\` | medium（13.7 M 参数） | 考题库 demo，几分钟 |
+| `dlqq_llm.properties` | `src\dlqq_llm\` | large（33 M 参数） | GB 级语料，约 1 小时 |
 
 **所有参数都在文件里**，改完保存就生效，不需要碰代码：
 
 | 键 | 含义 |
 |---|---|
-| `data_path` | 语料路径（相对工程根目录，`txt` / `jsonl` 都行） |
-| `model` | 模型名（不用写 `.pt`，自动存到 `model\`） |
+| `data_path` | 语料**目录**（相对工程根目录；目录里放 `txt` / `jsonl`，可以多个） |
+| `model` | 模型名（不用写 `.pt`，自动存到 `model\<名字>\<名字>.pt`） |
 | `cache_dir` | 切词缓存放哪（默认 `ai_res/cache`） |
 | `n_layer` / `n_head` / `n_embd` | 模型结构 |
 | `block_size` / `batch_size` | 上下文长度 / 每批条数 |
@@ -191,7 +189,7 @@ script\train.bat my.properties          REM 指定任意配置文件名
 配置文件覆盖不到的临时调整，可以直接传参：
 
 ```bat
-python code\train_llm.py data_path=src\chat_demo.jsonl out_path=model\chat_demo.pt max_iters=3000
+python code\train_llm.py data_path=src\chat_demo out_path=model\chat_demo\chat_demo.pt max_iters=3000
 ```
 
 > 参数是 `key=value` 形式，**不是** `--key value`。
@@ -217,7 +215,7 @@ python code\train_llm.py
 
 双击 `script\chat.bat`：
 
-- **直接回车** → 用默认模型 `model\chat_demo.pt`；
+- **直接回车** → 用默认模型 `model\chat_demo\chat_demo.pt`；
 - 输入**编号** → 选清单里的其它模型；
 - 输入**名称** → 用它找到对应的 `.pt`。
 
@@ -227,8 +225,8 @@ python code\train_llm.py
 script\chat.bat                  REM 回车用默认模型
 script\chat.bat 我的模型          REM 直接指定，跳过询问
 
-python code\chat.py model\chat_demo.pt                       REM 交互式
-python code\chat.py model\chat_demo.pt --once "用户：你好"     REM 只生成一次
+python code\chat.py model\chat_demo\chat_demo.pt               REM 交互式
+python code\chat.py model\chat_demo\chat_demo.pt --once "用户：你好"  REM 只生成一次
 ```
 
 ### 对话中的命令
@@ -253,19 +251,37 @@ python code\chat.py model\chat_demo.pt --once "用户：你好"     REM 只生�
 
 ## 用自己的语料
 
-把语料整理成一个 **UTF-8 的 txt**，每行一句即可；想让它会对话，就按下面的格式写：
+**语料统一放在一个目录里**（`data_path` 只接受目录，不再接受单个文件）。
 
-```text
-用户：什么是过拟合
-助手：模型把训练数据背下来了，换一批新数据就不行了。
-用户：那怎么缓解
-助手：加数据、加正则、减小模型容量，三条路一起走。
+先在 `src\` 下建一个目录，例如 `src\my_corpus\`，把语料文件丢进去：
+
+```
+src\
+  my_corpus\
+    part1.jsonl
+    part2.jsonl        ← 可以多个文件，训练时按文件名排序合并
+    notes.txt
+```
+
+支持的文件：
+
+| 文件 | 怎么处理 |
+|---|---|
+| `.jsonl` 问答（`input`/`target` 等） | 拼成「用户：…／助手：…」 |
+| `.jsonl` 纯文本（`{"text": "..."}`） | 原样当纯文本 |
+| `.txt` | 原样当纯文本（UTF-8 / GBK / BIG5 都能自动识别） |
+
+想让它会对话，jsonl 这样写：
+
+```json
+{"input": "什么是过拟合", "target": "模型把训练数据背下来了，换一批新数据就不行了。"}
+{"input": "那怎么缓解", "target": "加数据、加正则、减小模型容量，三条路一起走。"}
 ```
 
 然后训练：
 
 ```bat
-python code\train_llm.py data_path=src\我的语料.txt out_path=model\我的模型.pt max_iters=5000
+python code\train_llm.py data_path=src\my_corpus out_path=model\我的模型\我的模型.pt max_iters=5000
 ```
 
 几个经验值：
@@ -276,7 +292,7 @@ python code\train_llm.py data_path=src\我的语料.txt out_path=model\我的模
 | 1 MB 左右 | 开始能看出「学到了句式」，泛化明显变好 |
 | 10 MB 以上 | 短句通顺，长句仍会飘 |
 
-脚本会自动识别 `utf-8 / utf-8-sig / gb18030 / big5` 编码，记事本存的 GBK 文件也能直接读。
+目录里的文件按 UTF-8 / utf-8-sig / gb18030 / big5 自动识别，记事本存的 GBK 文件也能直接读。
 
 ### 下载来的语料要先清洗
 
@@ -304,7 +320,6 @@ python ai_res\script\prepare_corpus.py --in ai_res\doc\fineweb --out ai_res\doc\
 | `small`（默认） | 4 | 4 | 128 | 128 | 32 | ~0.8 M | < 1 G | 能看出效果 |
 | `medium` | 6 | 6 | 384 | 256 | 64 | ~10 M | ~2–3 G | 语料够大时明显更好 |
 | `large` | 8 | 8 | 512 | 256 | 32 | ~25 M | ~6–7 G | 8 G 显存的上限附近，别再往上 |
-| `dlqq_0.1b` 配置 | 12 | 12 | 768 | 512 | 8 | **~91 M** | **~2.6 G** | 长训练专用，见下节 |
 
 所有配置项都能在命令行覆盖：
 
@@ -342,36 +357,21 @@ python code\train_llm.py n_layer=6 n_embd=384 lr=1e-3 max_iters=5000
 
 ---
 
-## 训练 0.1B（长训练）
+## 让 dlqq_llm 训得更久（可选）
 
-`properties\dlqq_0.1b.properties` 是给 8 GB 显卡准备的长训练配置：
+`dlqq_llm` 现在直接在 `properties\dlqq_llm.properties` 上训练，想训得更久就改这个文件里的参数，
+不需要另建配置：
 
-```bat
-script\train.bat dlqq_0.1b
-```
-
-实测（RTX 4060 Laptop 8 GB，block 512，累积 8）：
-
-| 指标 | 数值 |
+| 参数 | 作用 |
 |---|---|
-| 参数量 | **91.57 M**（约 0.1B） |
-| 每步 token | 8 × 512 × 8 = **32768** |
-| 训练速度 | **1.8–2 万 token/秒**（约 1.8 秒/步） |
-| 显存占用 | 约 **2.6 GB**（加系统占用总共 4.6 GB，8 G 有富余） |
-| 1.2B token | 约 **18 小时** |
-| 1.5B token | 约 **23 小时** |
+| `max_iters` | 训练步数；配合 `batch_size × block_size` 估算见过的 token 数 |
+| `grad_accum` | 显存不够时用梯度累积凑等效 batch |
+| `warmup_iters` / `lr_decay` / `min_lr_frac` | 学习率预热 + 余弦退火，长训练必开 |
+| `grad_checkpoint` | 梯度检查点，省显存（慢 20–30%） |
+| `resume` | 改成 `true` 后从 `out_path` 接着训（优化器状态、学习率进度都接得上） |
+| `save_every` | 每 N 步强制存档，防止「验证损失一直没变好 → 一直不存盘」 |
 
-长训练两个关键点：
-
-**1. 中断后能接着训**。配置里把 `resume` 改成 `true` 再跑同一个配置即可：
-
-```properties
-resume=true
-```
-
-启动时会打印 `[续训] 从 … 的第 N 步接着训`，优化器状态和学习率进度都接得上。
-
-**2. 定期存档**。`save_every=2000` 表示每 2000 步强制存一次，防止「验证损失一直没变好 → 一直不存盘」的情况。
+例：把 `max_iters` 调到 60000、`resume=true`，双击 `script\train.bat` 选 `dlqq_llm` 即可继续。
 
 ---
 
@@ -384,8 +384,8 @@ resume=true
 
 ```bat
 REM 1) 下载考题（魔搭：C-Eval + 高考 + 生物），
-REM    直接写成 demo 语料 src\chat_demo.jsonl
-script\fetch_exam_data.bat
+REM    直接写成 demo 语料 src\chat_demo\chat_demo.jsonl
+script\fetch_chat_demo.bat
 
 REM 2) 训练 + 聊天（配置就是原来的 chat_demo，没有新增配置）
 script\train.bat chat_demo
@@ -423,14 +423,41 @@ demo 模型约 **27 MB**，塞进 50 MB 没问题。
 
 ```bat
 REM 考题：用自带脚本，直连魔搭，不需要 GitHub / HuggingFace / 登录
-script\fetch_exam_data.bat --datasets c-eval gaokao bio
+script\fetch_chat_demo.bat --datasets c-eval gaokao bio
 
-REM 大语料：装一次 modelscope，然后一条命令
-python -m pip install modelscope
-modelscope download --dataset philexohf/LLM-Pretrain-Data --local_dir ai_res\doc\pretrain
+REM 预训练大语料：用 ai_res\script 下的脚本，按需取多少 MB（HTTP Range，不整包下）
+ai_res\script\fetch_pretrain_corpus.bat --source mix --max-mb 2000
 ```
 
-24.6 GB 不用全下——`ai_res\doc\pretrain` 里按文件挑，凑够 3–4 GB 就够 0.1B 用了。
+`fetch_pretrain_corpus.bat` 会把清洗后的文本写成 jsonl 直接放进 `src\dlqq_llm\`，
+训练配置指向的就是这个目录，所以下完直接训即可。下载时会显示进度条（百分比、已下/总量、速度）。
+
+### 预训练语料有多大？为什么默认只下 2 GB？
+
+```bat
+ai_res\script\fetch_pretrain_corpus.bat --list
+```
+
+```
+mix      philexohf/LLM-Pretrain-Data
+         可用 1 个文件，合计 12.72 GB
+fineweb  AI-ModelScope/chinese-fineweb-edu
+         可用 302 个文件，合计 311.44 GB
+```
+
+| 语料 | 总量 | 说明 |
+|---|---|---|
+| `mix`（train.txt） | **12.72 GB** ≈ 45 亿 token | 网页+新闻+维基+百科，一行一篇 |
+| `fineweb` | **311 GB**（302 个 parquet 分片） | 教育向网页，按片下载 |
+
+默认 2 GB 是按模型规模算的：
+
+- `dlqq_llm` 是 33 M 参数，按「每参数 20 token」≈ **6.6 亿 token** 就够；
+- 2 GB 中文文本 ≈ 7 亿 token，加上原来的 `firefly-train-1.1M.jsonl`（1.1 GB ≈ 4 亿 token），
+  总量约 11 亿 token，已经超过所需；
+- 全下 12.7 GB 对 33 M 模型没有收益，只是多花 1–2 小时下载和 13 GB 硬盘。
+
+真要全量就传 `--max-mb 0`（一直下到结束），或者用 `--max-mb 8000` 取 8 GB。
 
 ---
 
@@ -460,7 +487,7 @@ prompt/response · query/response · ask/answer · title/content
 
 都对不上就显式指定：`q_field=问  a_field=答`。
 
-### 实测（1.12 GB 的 `src\dlqq_llm.jsonl`，1,649,399 条问答）
+### 实测（1.12 GB 的 `src\dlqq_llm\`，1,649,399 条问答）
 
 | 指标 | 数值 |
 |---|---|
@@ -474,7 +501,7 @@ prompt/response · query/response · ask/answer · title/content
 命令：
 
 ```bat
-python code\train_llm.py data_path=src\dlqq_llm.jsonl out_path=model\dlqq_llm.pt ^
+python code\train_llm.py data_path=src\dlqq_llm out_path=model\dlqq_llm\dlqq_llm.pt ^
     max_vocab=8000 n_layer=8 n_head=8 n_embd=512 block_size=256 batch_size=32 ^
     max_iters=60000 lr=3e-4 eval_interval=2000
 ```
@@ -493,10 +520,48 @@ python code\train_llm.py data_path=src\dlqq_llm.jsonl out_path=model\dlqq_llm.pt
 
 - 每份语料（连同 `max_vocab` / `val_frac` / 格式 / 字段这些设置）对应一个独立缓存文件
   `ai_res\cache\data-<指纹>.bin`，改任何一项都会自动写一份新的。
-  所以 demo 的 `chat_demo.jsonl` 和 GB 级的 `dlqq_llm.jsonl` 可以**同时留着**，
+  所以 demo 的 `chat_demo\` 和 GB 级的 `dlqq_llm\` 可以**同时留着**，
   来回切换不用重新切词；想全部重来就删 `ai_res\cache\`；
 - 验证集是从**语料尾部**切的。语料若按类别顺序排列（比如前半新闻、后半对话），
   建议先打乱行序，否则验证损失反映不了真实水平。
+
+### 加语料：往目录里丢文件就行
+
+`data_path` 既可以是**文件**，也可以是**目录**。`dlqq_llm.properties` 现在指向目录：
+
+```properties
+data_path=src/dlqq_llm
+```
+
+这个目录里可以放任意多个文件，训练时按文件名排序依次读、拼成一条流：
+
+| 放进去的东西 | 怎么处理 |
+|---|---|
+| `*.jsonl`（`input`/`target` 等问答字段） | 拼成 `用户：…／助手：…` |
+| `*.jsonl`（只有 `{"text": "..."}`） | 当纯文本直接喂（预训练语料就长这样） |
+| `*.txt` | 原样当纯文本 |
+| 子目录 | 也会扫（跳过隐藏目录） |
+
+新增/删除/改动文件后，缓存指纹会变，**下次训练自动重新切词**，不用手动删缓存。
+
+扩充语料用 `ai_res\script\fetch_pretrain_corpus.bat`（魔搭直连，不需要 GitHub / HuggingFace / 登录）：
+
+```bat
+REM 默认：混合语料（网页+新闻+维基+百科，已清洗）取 2 GB，写进 src\dlqq_llm\
+ai_res\script\fetch_pretrain_corpus.bat
+
+REM 只取 500 MB 先试；换教育向网页语料；或者全下
+ai_res\script\fetch_pretrain_corpus.bat --max-mb 500
+ai_res\script\fetch_pretrain_corpus.bat --source fineweb --max-mb 4000
+ai_res\script\fetch_pretrain_corpus.bat --max-mb 0
+
+REM 看有哪些语料、各有多大
+ai_res\script\fetch_pretrain_corpus.bat --list
+```
+
+它会做长度过滤、中文占比过滤、按行去重，输出 `pretrain-mix-000.jsonl`、`pretrain-mix-001.jsonl`……
+每个默认 200 MB，**已有文件绝不覆盖**（序号往后顺延）。下载时有进度条，
+结束后会打印「语料目录现在共 N 个文件 / X GB」。下完直接 `script\train.bat dlqq_llm`。
 
 ---
 
@@ -532,26 +597,25 @@ code/                     训练与对话脚本
 script/                   入口脚本（双击即用）
   train.bat               训练（列出 properties\ 里的配置让你选）
   chat.bat                进入对话
-  fetch_exam_data.bat     下载考题库、生成 demo 语料（魔搭，国内直连）
+  fetch_chat_demo.bat     下载考题库、生成 demo 语料（魔搭，国内直连）
   torch_check.bat         环境自检
   http_server.bat         启动桥接服务（供 DSH 接入）
   train_chat_helper.py    上面几个 bat 的交互逻辑
-  fetch_exam_data.py      考题下载与格式转换
+  fetch_chat_demo.py      考题下载与格式转换
   torch_check.py          自检的具体检查项
   http_server.py          桥接服务本体（OpenAI 兼容，独立自足）
 
 properties/               训练配置（一行一个 key=value，改完即生效）
-  chat_demo.properties    demo 配置（13.7 M 参数，语料来自 script\fetch_exam_data.bat）
-  dlqq_0.1b.properties    0.1B 长训练（91 M 参数，约 18 小时）
-  dlqq_llm.properties     GB 级语料 + large 档
+  chat_demo.properties    demo 配置（13.7 M 参数，语料来自 script\fetch_chat_demo.bat）
+  dlqq_llm.properties     GB 级语料（src\dlqq_llm\）+ large 档
 
 ai_res/                   临时目录，放辅助脚本与中间产物，**已被 .gitignore 忽略**
   cache/                  切词缓存（每份语料一个 data-<指纹>.bin）
   doc/                    原始语料 / 下载的题库
-  script/                 辅助工具：语料导出、PDF 转换、出图、跑分等
+  script/                 辅助工具：语料导出、PDF 转换、出图、跑分、预训练语料下载等
 
-src/                      语料（chat_demo.jsonl 由 script\fetch_exam_data.bat 生成）
-model/                    训练产出的 .pt（默认输出目录）
+src/                      语料目录（每个语料一个文件夹，例如 src\chat_demo\、src\dlqq_llm\）
+model/                    模型目录（每个模型一个文件夹：model\chat_demo\chat_demo.pt）
 release/                  打包输出目录
 ```
 
@@ -591,25 +655,26 @@ script\train.bat chat_demo
 
 不会。输入已存在的名称时会问你是否覆盖，回答 `n` 就可以换个名字。
 
-**Q：想训练但不想用 `chat_demo.jsonl`？**
+**Q：想训练但不想用 `chat_demo`？**
 
-复制一份配置改两行就行（`train.bat` 会自动列出新配置）：
+先在 `src\` 下建一个语料目录，再复制一份配置改两行（`train.bat` 会自动列出新配置）：
 
 ```
 # properties\my_corpus.properties
-data_path=src\我的语料.jsonl
+data_path=src\my_corpus      ← 目录，里面放 jsonl / txt
 model=我的模型
 ...（其余照抄 chat_demo.properties，按需改 n_layer / max_iters 等）
 ```
 
-`txt` 和 `jsonl` 都支持，格式按扩展名和文件开头自动判断；jsonl 会自动找问答字段。
+**`data_path` 只接受目录**；目录里 `txt` 和 `jsonl` 都支持，格式按扩展名和文件开头自动判断，
+jsonl 会自动找问答字段（`{"text": ...}` 这种单字段的当纯文本用）。
 
 **Q：想临时改一个参数，不想动配置文件？**
 
 直接调训练脚本，命令行覆盖会盖掉配置文件里的同名项：
 
 ```bat
-python code\train_llm.py data_path=src\chat_demo.jsonl out_path=model\chat_demo.pt max_iters=500
+python code\train_llm.py data_path=src\chat_demo out_path=model\chat_demo\chat_demo.pt max_iters=500
 ```
 
 **Q：模型训练很久还是只会复读？**
@@ -675,11 +740,11 @@ python script\http_server.py --help         REM 看全部参数
 | 基础 URL | `http://127.0.0.1:49128/v1` |
 | API 协议 | `openai-completions` |
 | 凭据 / API Key | `local`（本地服务不校验，但**这一栏不能留空**） |
-| 模型 | 点「获取可用模型」会列出 `model\` 里所有 `.pt`；**随便选，之后在模型选择器里随时切换** |
+| 模型 | 点「获取可用模型」会列出 `model\` 下所有模型；**随便选，之后在模型选择器里随时切换** |
 
-模型 id 就是权重文件名（不含 `.pt`）。同名文件出现在不同目录时会加目录名区分，
-例如 `chat_demo@release`；请求里的 `model` 写 `chat_demo`、`chat_demo.pt`、
-`model/chat_demo.pt` 都能认（大小写不敏感）。
+模型 id 就是模型目录名（`model\chat_demo\chat_demo.pt` → id `chat_demo`）；
+目录名和文件名不一致时才写成 `目录/文件名`，重名再加 `@父目录` 区分。
+请求里的 `model` 写 `chat_demo`、`chat_demo.pt`、`model/chat_demo/chat_demo.pt` 都能认（大小写不敏感）。
 
 保存后回到会话页，在模型选择器里换模型，服务端会自动加载对应权重。
 

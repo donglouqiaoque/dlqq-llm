@@ -133,7 +133,7 @@ path = cfg["model"]
 if not os.path.isfile(path):
     print(f"[错误] 找不到模型文件：{path}")
     print(f"       当前目录：{os.getcwd()}")
-    print( "       先训练一个：python code/train_llm.py data_path=src/chat_demo.jsonl out_path=model/chat_demo.pt")
+    print( "       先训练一个：python code/train_llm.py data_path=src/chat_demo out_path=model/chat_demo.pt")
     print( "       或指定别的模型：python code/chat.py model/你的模型.pt")
     sys.exit(1)
 

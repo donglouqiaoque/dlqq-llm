@@ -7,8 +7,8 @@ code\train_llm.py 得到，所以脚本换位置也不会失效。
 职责：
     · 挑一个装了 torch 的 python；依赖缺失就直接终止，并让用户去跑自检脚本；
     · 打印运行模式（CPU / GPU 单精度 / GPU 混合精度）与占用的显存或内存；
-    · 训练：列出 src\ 下的语料让用户选（默认 src\chat_demo.jsonl），模型名称由用户现场输入；
-    · 对话：模型默认 model\chat_demo.pt（缺失即终止），也可输编号或名称换一个。
+    · 训练：列出 src\ 下的语料目录让用户选（默认 src\chat_demo），模型名称由用户现场输入；
+    · 对话：模型默认 model\chat_demo\chat_demo.pt（缺失即终止），也可输编号或名称换一个。
 
 模型名称只存在于本次运行的变量里，不写进任何文件，也不回显。
 """
@@ -49,10 +49,10 @@ def find_root(start):
 ROOT = find_root(HERE)
 CODE = os.path.join(ROOT, "code")
 
-_DEMO_JSONL = os.path.join(ROOT, "src", "chat_demo.jsonl")
-# demo 语料只有考题库这一份（由 script\fetch_exam_data.bat 生成）
-DEFAULT_CORPUS = _DEMO_JSONL
-DEFAULT_MODEL = os.path.join(ROOT, "model", "chat_demo.pt")
+_DEMO_CORPUS_DIR = os.path.join(ROOT, "src", "chat_demo")
+# demo 语料目录（由 script\fetch_chat_demo.bat 生成里面的 jsonl）
+DEFAULT_CORPUS = _DEMO_CORPUS_DIR
+DEFAULT_MODEL = os.path.join(ROOT, "model", "chat_demo", "chat_demo.pt")
 
 # 配置文件所在目录（可放多份，train.bat 会让用户按编号选）
 CONFIG_DIR = os.path.join(ROOT, "properties")
@@ -377,11 +377,15 @@ def run(argv):
 # 训练
 # ==================================================================
 def list_corpora():
-    r"""列出 src\ 下可用于训练的语料（txt / jsonl），按文件名排序"""
+    r"""列出 src\ 下可用于训练的语料目录（统一按目录组织），按名字排序"""
+    base = os.path.join(ROOT, "src")
     listing = []
-    for pat in ("*.txt", "*.jsonl", "*.json"):
-        listing += glob.glob(os.path.join(ROOT, "src", pat))
-    return sorted(set(os.path.abspath(p) for p in listing))
+    if os.path.isdir(base):
+        for name in sorted(os.listdir(base)):
+            p = os.path.join(base, name)
+            if os.path.isdir(p) and not name.startswith("."):
+                listing.append(os.path.abspath(p))
+    return listing
 
 
 def pick_corpus(given):
@@ -392,29 +396,34 @@ def pick_corpus(given):
         cand = given
         if not os.path.isabs(cand):
             cand = os.path.join(ROOT, cand)
-        if not os.path.isfile(cand):
-            # 允许只写文件名不带目录
+        if not os.path.isdir(cand):
+            # 允许只写目录名不带 src\
             alt = os.path.join(ROOT, "src", given)
-            if os.path.isfile(alt):
+            if os.path.isdir(alt):
                 return alt, None
-            print(f"[错误] 找不到语料：{given}")
+            print(f"[错误] 找不到语料目录：{given}")
             print(f"       试过的路径：{short(cand)}")
+            print("       语料统一放在 src\\<名字>\\ 目录里，data_path 指向这个目录。")
             return None, "missing"
 
     listing = list_corpora()
     if not listing:
-        print(f"[错误] src\\ 下没有任何语料（.txt / .jsonl）")
-        print(f"       把语料放进 {short(os.path.join(ROOT, 'src'))} 再重跑。")
+        print(f"[错误] src\\ 下没有任何语料目录")
+        print(f"       建一个目录，把 .jsonl / .txt 放进去，例如 src\\my_corpus\\")
         return None, "empty"
 
-    # ---- 交互选择：直接回车 = chat_demo.jsonl（没有就第一个）----
+    # ---- 交互选择：直接回车 = chat_demo（没有就第一个）----
     default = next((p for p in listing
                     if os.path.basename(p) == os.path.basename(DEFAULT_CORPUS)), listing[0])
     print("可用语料：")
     for i, p in enumerate(listing, 1):
-        size = os.path.getsize(p) / 1e6
+        n = sum(1 for _, _, ns in os.walk(p) for nm in ns
+                if nm.lower().endswith((".jsonl", ".json", ".txt")))
+        total = sum(os.path.getsize(os.path.join(r, nm))
+                    for r, _, ns in os.walk(p) for nm in ns
+                    if nm.lower().endswith((".jsonl", ".json", ".txt")))
         mark = "  ← 默认" if p == default else ""
-        print(f"  [{i}] {os.path.basename(p):<28} {size:>9.1f} MB{mark}")
+        print(f"  [{i}] {os.path.basename(p):<24} {n} 个文件 {total/1e6:>8.1f} MB{mark}")
     raw = ask("请输入编号或文件名（直接回车用默认语料）", default="")
     if raw is None:
         print("[取消] 输入已结束")
@@ -423,12 +432,11 @@ def pick_corpus(given):
         return default, None
     if raw.isdigit() and 1 <= int(raw) <= len(listing):
         return listing[int(raw) - 1], None
-    hit = [p for p in listing if os.path.basename(p).lower() == raw.lower()
-           or os.path.basename(p).lower() == raw.lower() + ".txt"]
+    hit = [p for p in listing if os.path.basename(p).lower() == raw.lower()]
     if hit:
         return hit[0], None
     cand = raw if os.path.isabs(raw) else os.path.join(ROOT, raw)
-    if os.path.isfile(cand):
+    if os.path.isdir(cand):
         return os.path.abspath(cand), None
     print(f"[错误] 找不到这个语料：{raw}")
     return None, "missing"
@@ -513,21 +521,28 @@ def do_train_config(cfg, cfg_path):
     print(f"  训练（配置文件：{name}）")
     print("=" * 62)
 
-    # ---- 语料 ----
+    # ---- 语料：必须是一个目录（里面放多个 .jsonl / .txt）----
     data = path_from_cfg(cfg.get("data_path"))
-    if not data or not os.path.isfile(data):
+    if not data or not os.path.exists(data):
         print(f"[错误] 配置里的 data_path 找不到：{cfg.get('data_path') or '(空)'}")
         print(f"       解析后路径：{data or '(空)'}")
         if data and os.path.basename(data).startswith("chat_demo"):
-            print("       demo 语料还没生成，先跑：script\\fetch_exam_data.bat")
+            print("       demo 语料还没生成，先跑：script\\fetch_chat_demo.bat")
         return 1
-    head = open(data, "rb").read(2)
-    if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
-        print("[错误] 这个语料是 UTF-16 编码，训练脚本认不出它。")
-        print("       用记事本打开 → 另存为 → 编码选「UTF-8」→ 覆盖原文件，再重跑。")
+    if os.path.isfile(data):
+        print(f"[错误] data_path 是文件，现在只接受文件夹：{short(data)}")
+        print("       语料统一放在 src\\<名字>\\ 目录里，把文件挪进去再指目录：")
+        print(f"         mkdir src\\{os.path.splitext(os.path.basename(data))[0]}")
+        print(f"         move \"{data}\" src\\{os.path.splitext(os.path.basename(data))[0]}\\")
+        print(f"         data_path=src/{os.path.splitext(os.path.basename(data))[0]}")
+        return 1
+    files = [os.path.join(r, n) for r, _, ns in os.walk(data) for n in ns
+             if n.lower().endswith((".jsonl", ".json", ".txt"))]
+    if not files:
+        print(f"[错误] 目录里没有 .jsonl / .txt：{short(data)}")
         return 1
 
-    # ---- 模型名（配置里只写名字，统一落到 model\ 目录）----
+    # ---- 模型名（配置里只写名字，统一落到 model\<名字>\<名字>.pt）----
     raw_model = (cfg.get("model") or "model").strip()
     if os.path.splitext(raw_model)[1].lower() != ".pt":
         raw_model += ".pt"
@@ -536,7 +551,8 @@ def do_train_config(cfg, cfg_path):
     elif os.sep in raw_model or "/" in raw_model:
         out = path_from_cfg(raw_model)
     else:
-        out = os.path.join(ROOT, "model", raw_model)
+        name = os.path.splitext(raw_model)[0]
+        out = os.path.join(ROOT, "model", name, raw_model)
 
     # ---- 解释器（配置指定就只认它，不可用直接失败）----
     py, miss = resolve_python(cfg.get("python"))
@@ -552,7 +568,10 @@ def do_train_config(cfg, cfg_path):
             args.append(f"{k}={cfg[k]}")
 
     print()
-    print(f"[语料] {short(data)}")
+    if os.path.isdir(data):
+        print(f"[语料] {short(data)}（目录，{len(files)} 个文件）")
+    else:
+        print(f"[语料] {short(data)}")
     print(f"[输出] {short(out)}")
     shown = " ".join(f"{a.split('=', 1)[0]}={a.split('=', 1)[1]}"
                      for a in args[1:] if "=" in a and not a.startswith(("data_path", "out_path")))
@@ -682,7 +701,8 @@ def do_train(profile_name=None, iters=None, corpus=None):
             continue
         if not name.lower().endswith(".pt"):
             name += ".pt"
-        out = os.path.join(ROOT, "model", name)
+        stem = os.path.splitext(name)[0]
+        out = os.path.join(ROOT, "model", stem, name)
         if os.path.exists(out):
             ans = ask("这个名称已经存在，要覆盖吗？(y/N)", default="n")
             if ans is None:
@@ -705,7 +725,7 @@ def do_train(profile_name=None, iters=None, corpus=None):
     args += [f"{k}={v}" for k, v in profile.items()]
 
     print(f"\n[语料] {short(corpus)}")
-    print("[输出] model\\<你输入的名称>.pt")
+    print(f"[输出] {short(out)}")
     print(f"[档位] {profile_name}  " + " ".join(f"{k}={v}" for k, v in profile.items()))
     print(f"[解释器] {py}")
     if (ask("\n开始训练？(Y/n)", default="y") or "y").lower() not in ("y", "yes"):
@@ -798,7 +818,11 @@ def do_chat(name):
     if given:
         if not given.lower().endswith(".pt"):
             given += ".pt"
-        target = os.path.join(ROOT, "model", given)
+        stem = os.path.splitext(given)[0]
+        target = os.path.join(ROOT, "model", stem, given)
+        if not os.path.isfile(target):
+            legacy = os.path.join(ROOT, "model", given)
+            target = legacy if os.path.isfile(legacy) else target
         if not os.path.isfile(target):
             hit = [p for p in listing if os.path.basename(p).lower() == given.lower()]
             if hit:
@@ -837,7 +861,7 @@ def do_chat(name):
             target = DEFAULT_MODEL
             if not default_exists:
                 print(f"[错误] 找不到默认模型：{short(DEFAULT_MODEL)}")
-                print("       请先准备语料和模型（src\\chat_demo.jsonl 与 model\\chat_demo.pt），再重新运行。")
+                print("       请先准备语料目录和模型（src\\chat_demo\\ 与 model\\chat_demo.pt），再重新运行。")
                 return 1
         elif raw.isdigit() and listing and 1 <= int(raw) <= len(listing):
             target = listing[int(raw) - 1]
@@ -896,8 +920,8 @@ def main():
         if a.cwd:
             ROOT = find_root(os.path.abspath(a.cwd))
             CODE = os.path.join(ROOT, "code")
-            DEFAULT_CORPUS = os.path.join(ROOT, "src", "chat_demo.jsonl")
-            DEFAULT_MODEL = os.path.join(ROOT, "model", "chat_demo.pt")
+            DEFAULT_CORPUS = os.path.join(ROOT, "src", "chat_demo")
+            DEFAULT_MODEL = os.path.join(ROOT, "model", "chat_demo", "chat_demo.pt")
         exe, _ = find_python()
         if exe:
             print(exe)

@@ -24,7 +24,7 @@ r"""把训练好的模型起成一个 OpenAI 兼容的 HTTP 服务（桥接服�
 
 用法（在工程根目录执行）：
     python script\http_server.py
-    python script\http_server.py --model model\chat_demo.pt --port 49128
+    python script\http_server.py --model model\chat_demo\chat_demo.pt --port 49128
     python script\http_server.py --served-name my-model --device cpu
 或者直接双击 script\http_server.bat。
 """
@@ -326,31 +326,31 @@ def _clean_reply(text):
 # 模型清单 + 懒加载池
 # ==================================================================
 def scan_models(dirs):
-    """扫目录里的 .pt 权重，模型 id 用文件名（不含扩展名）。
-    同名文件出现在多个目录时，加 @目录名 区分，例如 chat_demo@release。"""
+    r"""扫目录里的 .pt 权重，模型 id 用目录名（不含扩展名）。
+    模型放在 model\<名字>\<名字>.pt；模型 id 优先用目录名，
+    目录名和文件名不一致时才写成 目录/文件名，重名再加 @父目录 区分。"""
     found = {}
     for d in dirs:
         if not d or not os.path.isdir(d):
             continue
-        try:
-            names = sorted(os.listdir(d))
-        except OSError:
-            continue
-        for fn in names:
-            if not fn.lower().endswith(".pt"):
-                continue
-            path = os.path.join(d, fn)
-            if not os.path.isfile(path):
-                continue
-            base = os.path.splitext(fn)[0]
-            mid = base
-            if mid in found:
-                mid = f"{base}@{os.path.basename(d.rstrip(os.sep))}"
-            k = 2
-            while mid in found:
-                mid = f"{base}@{os.path.basename(d.rstrip(os.sep))}-{k}"
-                k += 1
-            found[mid] = path
+        for root, subdirs, names in os.walk(d):
+            subdirs[:] = sorted(s for s in subdirs if not s.startswith("."))
+            for fn in sorted(names):
+                if not fn.lower().endswith(".pt"):
+                    continue
+                path = os.path.join(root, fn)
+                if not os.path.isfile(path):
+                    continue
+                base = os.path.splitext(fn)[0]
+                parent = os.path.basename(root.rstrip(os.sep))
+                mid = base if base == parent else f"{parent}/{base}"
+                if mid in found:
+                    mid = f"{mid}@{parent}"
+                k = 2
+                while mid in found:
+                    mid = f"{mid}@{parent}-{k}"
+                    k += 1
+                found[mid] = path
     return found
 
 
@@ -385,11 +385,16 @@ class ModelPool:
             return mid
         base = os.path.splitext(os.path.basename(mid))[0]
         low = base.lower()
+
+        def leaf(k):
+            # id 可能是 "名字" 或 "目录/名字"，也可能带 @后缀
+            return k.split("@")[0].split("/")[-1]
+
         for k in self.registry:
-            if k == base or k.split("@")[0] == base:
+            if k == base or leaf(k) == base:
                 return k
         for k in self.registry:
-            if k.lower() == base.lower() or k.split("@")[0].lower() == low:
+            if k.lower() == base.lower() or leaf(k).lower() == low:
                 return k
         return None
 

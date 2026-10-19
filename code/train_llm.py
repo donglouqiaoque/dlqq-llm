@@ -13,7 +13,7 @@
     python code\\train_llm.py max_iters=500 n_layer=2 n_embd=64  # 命令行覆盖任意配置
 
 用工程自带的演示语料（这是 script\\train.bat 实际执行的命令）：
-    python code\\train_llm.py data_path=src\\chat_demo.jsonl out_path=model\\chat_demo.pt max_iters=3000
+    python code\\train_llm.py data_path=src\\chat_demo out_path=model\\chat_demo.pt max_iters=3000
 
 吃一整份大语料（txt 或 jsonl 都行，第一次运行会先花些时间切词，之后自动复用 cache）：
     python code\\train_llm.py data_path=ai_res\\doc\\firefly-train-1.1M.jsonl out_path=model\\firefly.pt ^
@@ -206,6 +206,10 @@ def detect_fields(path, enc):
                 if cq in lower and ca in lower:
                     return lower[cq], lower[ca]
             strs = [k for k in keys if isinstance(obj.get(k), str)]
+            # 只有一段长文本的 jsonl（{"text": "..."}）当纯文本用，不加问答标签
+            for k in ("text", "content", "raw_content", "document"):
+                if isinstance(obj.get(k), str) and obj[k].strip():
+                    return "", ""
             if len(strs) >= 2:
                 return strs[0], strs[1]
             print(f"[数据] x 这一行的字段是 {keys}，找不到可用的问答字段")
@@ -217,18 +221,61 @@ def detect_fields(path, enc):
     sys.exit(1)
 
 
+def _pick_plain(obj):
+    """纯文本 jsonl 里取正文的字段"""
+    for k in ("text", "content", "raw_content", "document", "input"):
+        v = obj.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    return None
+
+
 def iter_text_chunks(path, enc, fmt, qf, af, stats=None):
     """按块产出纯文本。
     txt  : 原样分块读。
-    jsonl: 逐行解析，拼成「用户：…／助手：…」—— 直接喂 jsonl 会把括号引号学进文法里。
+    jsonl: qf/af 为空 = 纯文本 jsonl（每行一段正文，原样拼）；
+           否则按问答拼成「用户：…／助手：…」—— 直接喂 jsonl 会把括号引号学进文法里。
     stats: 可选 dict，用来回传 (处理条数, 坏行数)。
     """
     if fmt == "txt":
         yield from iter_chunks(path, enc)
         return
 
-    buf, buf_len = [], 0
     n_ok = n_bad = 0
+
+    # ---- 纯文本 jsonl：一行一段，原样拼起来 ----
+    if not qf and not af:
+        buf, buf_len = [], 0
+        with open(path, encoding=enc, errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    n_bad += 1
+                    continue
+                s = _pick_plain(obj) if isinstance(obj, dict) else None
+                if not s:
+                    n_bad += 1
+                    continue
+                s = s.strip()
+                buf.append(s + "\n")
+                buf_len += len(s) + 1
+                n_ok += 1
+                if buf_len >= CHUNK_CHARS:
+                    if stats is not None:
+                        stats["ok"], stats["bad"] = n_ok, n_bad
+                    yield "".join(buf)
+                    buf, buf_len = [], 0
+        if buf:
+            yield "".join(buf)
+        if stats is not None:
+            stats["ok"], stats["bad"] = n_ok, n_bad
+        return
+
+    buf, buf_len = [], 0
     with open(path, encoding=enc, errors="replace") as f:
         for line in f:
             line = line.strip()
@@ -258,51 +305,116 @@ def iter_text_chunks(path, enc, fmt, qf, af, stats=None):
         stats["ok"], stats["bad"] = n_ok, n_bad
 
 
-def resolve_corpus_path():
-    """确定语料文件：data_path 优先；没指定就下载 TinyShakespeare 存到 cache"""
+CORPUS_EXTS = (".jsonl", ".json", ".txt")
+
+
+def list_corpus_files(path):
+    """语料统一放在一个目录里：目录下可以放多个 .jsonl / .txt，
+    按路径排序依次读取，子目录也会扫（跳过隐藏目录）。"""
+    if not os.path.isdir(path):
+        return []
+    files = []
+    for root, dirs, names in os.walk(path):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        for n in sorted(names):
+            if n.lower().endswith(CORPUS_EXTS) and not n.startswith("."):
+                files.append(os.path.join(root, n))
+    return sorted(files)
+
+
+def resolve_corpus_files():
+    """确定语料文件：data_path 必须是一个目录；没指定就下载 TinyShakespeare 到 cache 目录"""
     p = CONFIG["data_path"]
     if p:
         if os.path.isfile(p):
-            return p
-        print(f"[数据] x 找不到文件：{p}")
+            print(f"[数据] x data_path 是文件，现在只接受文件夹：{p}")
+            print(f"[数据]   建一个目录把它放进去，然后把 data_path 指向目录，例如：")
+            name = os.path.splitext(os.path.basename(p))[0]
+            print(f"[数据]     mkdir src\\{name}  &&  move \"{p}\" src\\{name}\\")
+            print(f"[数据]     data_path=src/{name}")
+            sys.exit(1)
+        files = list_corpus_files(p)
+        if files:
+            return files
+        if os.path.isdir(p):
+            print(f"[数据] x 目录里没有 .jsonl / .txt：{p}")
+        else:
+            print(f"[数据] x 找不到目录：{p}")
         print(f"[数据]   当前工作目录：{os.getcwd()}")
-        print('[数据]   路径带反斜杠的话，用引号包起来试试，例如 data_path="E:/我的文本.txt"')
+        print('[数据]   路径带反斜杠的话，用引号包起来试试，例如 data_path="E:/我的语料"')
         print("=" * 62)
         print("  没有语料，训练无法开始。")
         print("=" * 62)
         sys.exit(1)
 
-    os.makedirs(CONFIG["cache_dir"], exist_ok=True)
-    dst = os.path.join(CONFIG["cache_dir"], "tinyshakespeare.txt")
+    # 没指定语料：下载 TinyShakespeare，也放进一个目录里（和其他语料保持同一种结构）
+    corpus_dir = os.path.join(CONFIG["cache_dir"], "tinyshakespeare")
+    os.makedirs(corpus_dir, exist_ok=True)
+    dst = os.path.join(corpus_dir, "input.txt")
     if os.path.isfile(dst):
         print(f"[数据] 用已下载的 {dst}")
-        return dst
+        return [dst]
     try:
         print(f"[数据] 下载 {URL}")
         raw = urllib.request.urlopen(URL, timeout=20).read()
         with open(dst, "wb") as f:
             f.write(raw)
         print(f"[数据] 下载完成 {len(raw):,} 字节 → {dst}")
-        return dst
+        return [dst]
     except Exception as e:
         print(f"[数据] 下载失败（{e}）")
         print("=" * 62)
         print("  没有语料，训练无法开始。二选一：")
         print("    1) 检查网络后重跑（要下 TinyShakespeare，约 1.1 MB）")
-        print("    2) 用本地语料：  data_path=你的语料.txt")
+        print("    2) 用本地语料：  data_path=src\\你的语料目录")
         print("=" * 62)
         sys.exit(1)
 
 
-def count_char_freq(path, enc, fmt, qf, af):
+def inspect_corpus(files):
+    """给每个文件定好编码 / 格式 / 问答字段，并记下大小和修改时间（缓存指纹要用）"""
+    spec = []
+    for path in files:
+        enc = detect_encoding(path)
+        if enc is None:
+            print(f"[数据] ! 跳过（编码认不出）：{path}")
+            continue
+        fmt = detect_format(path)
+        qf = af = ""
+        if fmt == "jsonl":
+            qf, af = detect_fields(path, enc)
+        spec.append(dict(path=path, enc=enc, fmt=fmt, qf=qf, af=af,
+                         size=os.path.getsize(path), mtime=int(os.path.getmtime(path))))
+    if not spec:
+        print("[数据] x 没有可用的语料文件")
+        sys.exit(1)
+    return spec
+
+
+def describe_spec(item):
+    """一行描述：文件名 + 大小 + 格式/字段"""
+    name = os.path.basename(item["path"])
+    mb = item["size"] / 1e6
+    if item["fmt"] == "txt":
+        how = "txt"
+    elif not item["qf"]:
+        how = "jsonl 纯文本"
+    else:
+        how = f"jsonl 问答 {item['qf']}→{item['af']}"
+    return f"  {name:<32} {mb:>9.1f} MB  {how}"
+
+
+def count_char_freq(spec):
     """流式统计每个字符出现多少次 —— 用 numpy 一次算一整块，比 Python 循环快几百倍"""
     counts = np.zeros(0x110000, dtype=np.int64)
     done, t0 = 0, time.time()
-    for s in iter_text_chunks(path, enc, fmt, qf, af):
-        cps = np.frombuffer(s.encode("utf-32-le", errors="ignore"), dtype="<u4")
-        counts += np.bincount(cps, minlength=0x110000)
-        done += len(s)
-        print(f"\r[词表] 已扫描 {done:,} 字符 | {time.time() - t0:5.1f}s", end="", flush=True)
+    for item in spec:
+        for s in iter_text_chunks(item["path"], item["enc"], item["fmt"],
+                                  item["qf"], item["af"]):
+            cps = np.frombuffer(s.encode("utf-32-le", errors="ignore"), dtype="<u4")
+            counts += np.bincount(cps, minlength=0x110000)
+            done += len(s)
+            print(f"\r[词表] 已扫描 {done:,} 字符 | {time.time() - t0:5.1f}s", end="", flush=True)
     print()
     return counts
 
@@ -321,58 +433,59 @@ def build_vocab(counts, max_vocab):
     return [chr(int(i)) for i in order]
 
 
-def tokenize_corpus(path, enc, fmt, qf, af, chars, bin_path):
+def tokenize_corpus(spec, chars, bin_path):
     """把语料编码成 uint16 序列写进二进制文件；词表外的字直接丢掉。
-    返回 (写出的 token 数, 被丢掉的字符数, 跳过的坏行数)。"""
+    返回 (写出的 token 数, 被丢掉的字符数, 跳过的坏行数, 解析出的条数)。"""
     codes = np.array([ord(c) for c in chars], dtype=np.uint32)
     order = np.argsort(codes)
     codes_sorted = codes[order]                 # 升序，供 searchsorted 用
     ids_of_sorted = order.astype(np.uint16)     # 排序位置 → chars 里的原 id
 
-    stats = {"ok": 0, "bad": 0}
-    total = dropped = 0
+    total = dropped = bad_total = ok_total = 0
     t0 = time.time()
     with open(bin_path, "wb") as out:
-        for s in iter_text_chunks(path, enc, fmt, qf, af, stats):
-            cps = np.frombuffer(s.encode("utf-32-le", errors="ignore"), dtype="<u4")
-            pos = np.searchsorted(codes_sorted, cps)
-            np.clip(pos, 0, len(codes_sorted) - 1, out=pos)
-            hit = codes_sorted[pos] == cps      # 真的在词表里（不是被 clip 挤到一起的）
-            ids = ids_of_sorted[pos[hit]]
-            out.write(ids.tobytes())
-            total += len(ids)
-            dropped += len(cps) - len(ids)
-            msg = f"\r[编码] 已写出 {total:,} token"
-            if fmt == "jsonl":
-                msg += f" | 已处理 {stats['ok']:,} 条"
-            print(f"{msg} | {time.time() - t0:5.1f}s", end="", flush=True)
+        for item in spec:
+            stats = {"ok": 0, "bad": 0}
+            for s in iter_text_chunks(item["path"], item["enc"], item["fmt"],
+                                      item["qf"], item["af"], stats):
+                cps = np.frombuffer(s.encode("utf-32-le", errors="ignore"), dtype="<u4")
+                pos = np.searchsorted(codes_sorted, cps)
+                np.clip(pos, 0, len(codes_sorted) - 1, out=pos)
+                hit = codes_sorted[pos] == cps      # 真的在词表里（不是被 clip 挤到一起的）
+                ids = ids_of_sorted[pos[hit]]
+                out.write(ids.tobytes())
+                total += len(ids)
+                dropped += len(cps) - len(ids)
+                msg = f"\r[编码] 已写出 {total:,} token"
+                if item["fmt"] == "jsonl" and item["qf"]:
+                    msg += f" | 已处理 {ok_total + stats['ok']:,} 条"
+                print(f"{msg} | {time.time() - t0:5.1f}s", end="", flush=True)
+            bad_total += stats["bad"]
+            ok_total += stats["ok"]
     print()
-    return total, dropped, stats["bad"], stats["ok"]
+    return total, dropped, bad_total, ok_total
 
 
 def prepare_data():
     """准备训练数据：优先复用 cache；语料或词表设置变了就重建。
+    data_path 可以是单个文件，也可以是一个目录（里面放多个 .jsonl / .txt）。
     返回 (chars, bin 路径, 训练 token 数, 总 token 数)。"""
-    path = resolve_corpus_path()
-    enc = detect_encoding(path)
-    if enc is None:
-        print("[数据] x utf-8 / gbk / big5 都解不出来，可能不是文本文件")
-        sys.exit(1)
+    files = resolve_corpus_files()
+    spec = inspect_corpus(files)
 
-    fmt = detect_format(path)
-    if fmt == "jsonl":
-        qf, af = detect_fields(path, enc)
-    else:
-        qf = af = ""
-
-    size, mtime = os.path.getsize(path), int(os.path.getmtime(path))
+    total_size = sum(x["size"] for x in spec)
+    is_dir = bool(CONFIG["data_path"]) and os.path.isdir(CONFIG["data_path"])
     os.makedirs(CONFIG["cache_dir"], exist_ok=True)
-    want = dict(source=os.path.abspath(path), size=size, mtime=mtime,
-                max_vocab=CONFIG["max_vocab"], val_frac=CONFIG["val_frac"],
-                format=fmt, q_field=qf, a_field=af)
 
-    # 缓存文件名带上「语料 + 词表设置」的指纹：
-    # 这样 demo 的 txt 和 GB 级 jsonl 可以各存一份，来回切换不用重切词。
+    # 缓存指纹要把「目录里每个文件的名字/大小/修改时间 + 格式/字段」都算进去：
+    # 往目录里新丢一个 jsonl，指纹就变，自动重新切词。
+    src_root = os.path.abspath(CONFIG["data_path"]) if CONFIG["data_path"] else ""
+    want = dict(
+        source=src_root,
+        files=[[os.path.relpath(x["path"], src_root) if is_dir else os.path.basename(x["path"]),
+                x["size"], x["mtime"], x["fmt"], x["qf"], x["af"]] for x in spec],
+        max_vocab=CONFIG["max_vocab"], val_frac=CONFIG["val_frac"],
+    )
     tag = hashlib.md5(json.dumps(want, sort_keys=True).encode("utf-8")).hexdigest()[:10]
     bin_path = os.path.join(CONFIG["cache_dir"], f"data-{tag}.bin")
     meta_path = os.path.join(CONFIG["cache_dir"], f"meta-{tag}.json")
@@ -389,19 +502,23 @@ def prepare_data():
     if meta:
         print(f"[数据] 复用缓存 {bin_path}（这份语料切过词了，跳过）")
     else:
-        print(f"[数据] 语料 {path}")
-        print(f"[数据] 格式 {fmt} | 编码 {enc} | {size / 1e6:.1f} MB")
-        if fmt == "jsonl":
-            print(f"[数据] 问答字段 {qf} → {af}，会拼成「{USER_TAG}…／{ASSIST_TAG}…」")
-        counts = count_char_freq(path, enc, fmt, qf, af)
+        if is_dir:
+            print(f"[数据] 语料目录 {CONFIG['data_path']}（{len(spec)} 个文件，"
+                  f"共 {total_size / 1e6:.1f} MB）")
+            for item in spec:
+                print("[数据]" + describe_spec(item))
+        else:
+            print(f"[数据] 语料 {spec[0]['path']}（{total_size / 1e6:.1f} MB）")
+            print("[数据]" + describe_spec(spec[0]).strip())
+        counts = count_char_freq(spec)
         chars = build_vocab(counts, CONFIG["max_vocab"])
         if not chars:
             print("[数据] x 语料里没有任何可用字符")
             sys.exit(1)
         print(f"[词表] 保留 {len(chars)} 个字符（上限 {CONFIG['max_vocab']}）")
-        total, dropped, bad, ok = tokenize_corpus(path, enc, fmt, qf, af, chars, bin_path)
-        if fmt == "jsonl":
-            print(f"[数据] 共解析 {ok:,} 条问答" + (f"，跳过 {bad:,} 行（空/坏/字段缺）" if bad else ""))
+        total, dropped, bad, ok = tokenize_corpus(spec, chars, bin_path)
+        if ok or bad:
+            print(f"[数据] 共解析 {ok:,} 条" + (f"，跳过 {bad:,} 行（空/坏/字段缺）" if bad else ""))
         if total < 1000:
             print(f"[数据] x 编码后只剩 {total} 个 token，太少，检查语料或字段设置")
             sys.exit(1)

@@ -12,19 +12,19 @@
     tcm           中医考试题（约 10 MB）
     cflue         金融资格考试选择题（约 66 MB）
 
-用法（也可以直接双击 script\\fetch_exam_data.bat）：
-    python script\\fetch_exam_data.py --list          （看有哪些）
-    python script\\fetch_exam_data.py --out ai_res\\doc\\exam
-    python script\\fetch_exam_data.py --out ai_res\\doc\\exam --datasets c-eval gaokao
-    python script\\fetch_exam_data.py --from-dir ai_res\\doc\\exam --out ai_res\\doc\\exam
+用法（也可以直接双击 script\\fetch_chat_demo.bat）：
+    python script\\fetch_chat_demo.py --list          （看有哪些）
+    python script\\fetch_chat_demo.py --out ai_res\\doc\\exam
+    python script\\fetch_chat_demo.py --out ai_res\\doc\\exam --datasets c-eval gaokao
+    python script\\fetch_chat_demo.py --from-dir ai_res\\doc\\exam --out ai_res\\doc\\exam
 
 产出（--out 目录下）：
     exam_train.jsonl   训练用（用户：…／助手：…）
     exam_eval.jsonl    评测用（只留着打分，不要拿去训练）
     raw\\               原始下载文件
 
-做成 demo 语料时，bat 会加 --all-to-train --single src\\chat_demo.jsonl，
-把题目全部写进 src\\chat_demo.jsonl（chat_demo 配置直接吃这个文件）。
+做成 demo 语料时，bat 会加 --all-to-train --single src\\chat_demo\\chat_demo.jsonl，
+把题目全部写进语料目录 src\\chat_demo\\（chat_demo 配置直接吃这个目录）。
 
 ⚠ 评测集拿去训练，你报出来的分数就是自己背的答案，没有任何意义。
 """
@@ -370,7 +370,7 @@ def main():
     ap.add_argument("--from-dir", default=None, help="跳过下载，直接转换这个目录里已有的文件")
     ap.add_argument("--max-per-file", type=int, default=0, help="每个文件最多取多少条（调试用）")
     ap.add_argument("--all-to-train", action="store_true", help="全部转成训练集（demo 语料用）")
-    ap.add_argument("--single", default=None, help="只写一个文件，例如 src\\chat_demo.jsonl")
+    ap.add_argument("--single", default=None, help="只写一个文件，例如 src\\chat_demo\\chat_demo.jsonl")
     ap.add_argument("--list", action="store_true", help="只列出可选数据集，不下载")
     args = ap.parse_args()
 
@@ -391,7 +391,7 @@ def main():
         got = download(names, raw_dir)
         if not got:
             print("\n[错误] 一个数据集都没下下来。")
-            print("       看看有哪些：python script\\fetch_exam_data.py --list --out .")
+            print("       看看有哪些：python script\\fetch_chat_demo.py --list --out .")
             return 1
 
     return convert(raw_dir, out_dir, args.max_per_file, args.all_to_train, args.single)
