@@ -212,6 +212,27 @@ def load_model(path, device=None):
 # ==================================================================
 # 生成：把 messages 拼成提示词，逐字符采样
 # ==================================================================
+def read_model_props(path):
+    r"""读 properties\<模型名>.properties 里的对话设置（改完不用重训就生效）"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    stem = os.path.splitext(os.path.basename(path))[0]
+    p = os.path.join(root, "properties", stem + ".properties")
+    out = {}
+    if not os.path.isfile(p):
+        return out
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+    except OSError:
+        return {}
+    return out
+
+
 class Engine:
     def __init__(self, path, device=None):
         self.model, chars, self.cfg, self.device = load_model(path, device)
@@ -222,6 +243,37 @@ class Engine:
         self.lock = threading.Lock()      # 同一时刻只跑一个生成，避免并发互相踩
         self.loaded = time.strftime("%Y-%m-%d %H:%M:%S")
         self.warned_tools = False         # 只在第一次遇到 tools 时提示一次
+
+        # 对话设置优先级：properties\<模型名>.properties > 模型文件里存的 > 服务启动参数
+        cfg = self.cfg
+        props = read_model_props(path)
+        self.chat_mode = bool(cfg.get("chat_mode", True))
+        if "chat_mode" in props:
+            self.chat_mode = props["chat_mode"].strip().lower() in ("1", "true", "yes", "y", "on")
+        self.defaults = {}
+        if "chat_temperature" in cfg:
+            try:
+                self.defaults["temperature"] = float(cfg["chat_temperature"])
+            except (TypeError, ValueError):
+                pass
+        if "chat_top_k" in cfg:
+            try:
+                self.defaults["top_k"] = int(cfg["chat_top_k"])
+            except (TypeError, ValueError):
+                pass
+        if "chat_max_new" in cfg:
+            try:
+                self.defaults["max_chars"] = int(cfg["chat_max_new"])
+            except (TypeError, ValueError):
+                pass
+        for prop_key, name, cast in (("chat_temperature", "temperature", float),
+                                     ("chat_top_k", "top_k", int),
+                                     ("chat_max_new", "max_chars", int)):
+            if prop_key in props:
+                try:
+                    self.defaults[name] = cast(props[prop_key])
+                except (TypeError, ValueError):
+                    pass
 
     # ---- 提示词 ----
     def build_prompt(self, messages):
@@ -250,6 +302,11 @@ class Engine:
             convo.pop()
         if not convo:
             return "", 0
+
+        # 纯续写模型（诗词）：把用户输入当一段文本的开头，不加任何标记
+        if not self.chat_mode:
+            text = convo[-1][1]
+            return text[-self.block:], 1
 
         # 历史塞不下就从最早的一轮开始丢；只剩一轮还太长，就按字符保留尾部
         budget = max(self.block - 8, 8)
@@ -566,16 +623,24 @@ class Handler(BaseHTTPRequestHandler):
             self._dump_debug(req, prompt, turns)
 
         temperature = req.get("temperature")
-        temperature = ARGS.temperature if temperature is None else float(temperature)
+        if temperature is None:
+            temperature = eng.defaults.get("temperature", ARGS.temperature)
+        else:
+            temperature = float(temperature)
         top_k = req.get("top_k")
-        top_k = ARGS.top_k if top_k is None else int(top_k)
-        max_chars = req.get("max_tokens") or req.get("max_completion_tokens") or ARGS.max_chars
+        if top_k is None:
+            top_k = eng.defaults.get("top_k", ARGS.top_k)
+        else:
+            top_k = int(top_k)
+        max_chars = req.get("max_tokens") or req.get("max_completion_tokens")
+        if max_chars is None:
+            max_chars = eng.defaults.get("max_chars", ARGS.max_chars)
         # 字符级模型：把「token 数」当成字符数，并夹在合理区间里
         max_chars = max(1, min(int(max_chars), ARGS.max_chars_cap))
 
         t0 = time.time()
         text = eng.generate(prompt, max_chars, temperature, top_k,
-                            stop_on_user=not ARGS.no_stop_on_user)
+                            stop_on_user=(eng.chat_mode and not ARGS.no_stop_on_user))
         dt = time.time() - t0
         cid = "chatcmpl-" + uuid.uuid4().hex[:24]
         created = int(time.time())

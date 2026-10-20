@@ -72,6 +72,11 @@ CONFIG = dict(
     data_format = "auto",    # auto / txt / jsonl；auto 按扩展名和文件开头判断
     q_field     = "",        # jsonl 里「问」的字段名；留空自动推断
     a_field     = "",        # jsonl 里「答」的字段名；留空自动推断
+    chat_mode   = True,      # 语料是「用户：…／助手：…」问答格式；纯续写模型（诗词）设 False
+    # ---- 对话参数（存进模型文件，chat.py / http_server 按模型取用）----
+    chat_temperature = 0.8,  # 采样温度：越大越发散，越小越保守
+    chat_top_k       = 40,   # 只从概率最高的 K 个里采样；0 = 不截断
+    chat_max_new     = 180,  # 一次最多生成多少字
     # ---- 训练调度（长训练必需）----
     grad_accum      = 1,        # 梯度累积步数：显存不够时用它凑等效 batch
     warmup_iters    = 0,        # 学习率线性预热多少步

@@ -1,15 +1,20 @@
+#----------忽略区----------
+# 忽略idea自身
 .idea
-
+# 忽略缓存与资源目录
 ai_res/*
-
+# 忽略除chat_demo以外的模型（模型文件太大Gitee不让上传）
 model/*
 src/*
 properties/*
-
-!.gitkeep
-
-!chat_demo*
-#!dlqq_llm* # 文件太大Gitee不让上传
-
+# 忽略快捷方式（快捷方式不通用）
 script/dlqq-llm.lnk
 script/logo.ico
+#-------------------------
+
+#----------排除区----------
+# 排除.gitkeep（用于保留空目录）
+!.gitkeep
+# 排除chat_demo模型
+!chat_demo*
+#-------------------------

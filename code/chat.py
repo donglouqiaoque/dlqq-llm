@@ -33,6 +33,7 @@ import torch.nn.functional as F
 # ---------------- 参数解析 ----------------
 cfg = dict(model="mymodel.pt", temperature=0.8, top_k=40, max_new=180,
            chat_mode=True, device=None)
+explicit = set()          # 命令行显式给了哪些，优先级高于模型里存的
 once = None
 args = sys.argv[1:]
 i = 0
@@ -54,6 +55,7 @@ while i < len(args):
                 cfg[k] = int(v) if isinstance(cur, int) else float(v) if isinstance(cur, float) else v
             except ValueError:
                 cfg[k] = v
+            explicit.add(k)
     else:
         # 位置参数：直接当成模型路径（python chat.py model\mymodel.pt）
         cfg["model"] = a
@@ -143,8 +145,65 @@ stoi = {c: i for i, c in enumerate(chars)}
 itos = {i: c for c, i in stoi.items()}
 model = GPT(len(chars), C["block_size"], C["n_layer"], C["n_head"], C["n_embd"], 0.0).to(DEVICE)
 model.load_state_dict(ckpt["model"]); model.eval()
+def load_chat_props(model_path):
+    r"""读 properties\<模型名>.properties 里的对话设置。
+    这样调采样参数不用重新训练，改完 properties 直接生效。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    stem = os.path.splitext(os.path.basename(model_path))[0]
+    p = os.path.join(root, "properties", stem + ".properties")
+    if not os.path.isfile(p):
+        return {}, None
+    out = {}
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+    except OSError:
+        return {}, None
+    return out, p
+
+
+# 优先级：命令行显式 > properties\<模型名>.properties > 模型文件里存的 > 默认值
+wanted = {}
+if "chat_mode" in C:
+    wanted["chat_mode"] = bool(C["chat_mode"])
+for key, ck_key in (("temperature", "chat_temperature"),
+                    ("top_k", "chat_top_k"),
+                    ("max_new", "chat_max_new")):
+    if ck_key in C:
+        wanted[key] = C[ck_key]
+
+props, props_path = load_chat_props(path)
+if "chat_mode" in props:
+    wanted["chat_mode"] = props["chat_mode"].strip().lower() in ("1", "true", "yes", "y", "on")
+for key, prop_key in (("temperature", "chat_temperature"),
+                      ("top_k", "chat_top_k"),
+                      ("max_new", "chat_max_new")):
+    if prop_key in props:
+        wanted[key] = props[prop_key]
+
+for key, val in wanted.items():
+    if key in explicit:
+        continue
+    try:
+        cfg[key] = type(cfg[key])(val)
+    except (TypeError, ValueError):
+        pass
+
+SAMPLING_KEYS = {"temperature", "top_k", "max_new", "chat_mode"}
+props_used = any(k in props for k in ("chat_mode", "chat_temperature",
+                                      "chat_top_k", "chat_max_new"))
 print(f"[模型] {path} | 参数量 {sum(p.numel() for p in model.parameters())/1e6:.2f}M "
-      f"| 词表 {len(chars)} | 设备 {DEVICE}")
+      f"| 词表 {len(chars)} | 设备 {DEVICE}"
+      + (" | 续写模式" if not cfg["chat_mode"] else ""))
+where = (f"properties\\{os.path.basename(props_path)}" if props_used
+         else "模型配置/默认值")
+print(f"[采样] 温度={cfg['temperature']} top_k={cfg['top_k']} 长度={cfg['max_new']}"
+      + ("（命令行覆盖）" if explicit & SAMPLING_KEYS else f"（来自 {where}）"))
 
 def unknown(s):
     return [c for c in s if c not in stoi]
@@ -172,6 +231,9 @@ def reply(text):
     idx = torch.tensor([[stoi[c] for c in prompt]], device=DEVICE)
     out = model.generate(idx, cfg["max_new"], cfg["temperature"], cfg["top_k"])
     full = "".join(itos[i] for i in out[0].tolist())
+    # 续写模式：把我们给的提示词去掉，只显示它写出来的部分
+    if not cfg["chat_mode"] and full.startswith(prompt):
+        full = full[len(prompt):]
     # 只截取「助手：」之后的部分
     if cfg["chat_mode"] and "助手：" in full:
         full = full.split("助手：", 1)[1]

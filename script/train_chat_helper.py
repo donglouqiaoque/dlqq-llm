@@ -63,7 +63,8 @@ TRAIN_KEYS = ("n_layer", "n_head", "n_embd", "block_size", "batch_size",
               "weight_decay", "grad_clip", "seed", "max_vocab", "val_frac",
               "cache_dir", "grad_accum", "warmup_iters", "lr_decay",
               "min_lr_frac", "grad_checkpoint", "resume", "save_every",
-              "save_dtype", "save_optimizer")
+              "save_dtype", "save_optimizer", "chat_mode",
+              "chat_temperature", "chat_top_k", "chat_max_new")
 
 # 训练档位：命令行 -p 指定（配置文件里一般直接写满各项，不用档位）
 PROFILES = {

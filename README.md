@@ -131,6 +131,7 @@ python=D:\Soft\Python\Python3_13_9\python.exe
 Available configs:
   [1] chat_demo.properties
   [2] dlqq_llm.properties
+  [3] dlqq_poem.properties
 
 Select a number (Enter = 1): 1
 ```
@@ -158,6 +159,7 @@ Select a number (Enter = 1): 1
 |---|---|---|---|
 | `chat_demo.properties` | `src\chat_demo\` | medium（13.7 M 参数） | 考题库 demo，几分钟 |
 | `dlqq_llm.properties` | `src\dlqq_llm\` | large（33 M 参数） | GB 级语料，约 1 小时 |
+| `dlqq_poem.properties` | `src\dlqq_poem\` | small（14.1 M 参数） | 写诗（古诗+宋词+现代诗），约 30 分钟 |
 
 **所有参数都在文件里**，改完保存就生效，不需要碰代码：
 
@@ -354,6 +356,17 @@ python code\train_llm.py n_layer=6 n_embd=384 lr=1e-3 max_iters=5000
 | `grad_checkpoint` | `False` | 梯度检查点：省显存，慢约 20–30% |
 | `resume` | `False` | 从 `out_path` 接着训（要里面存过 optimizer/iter） |
 | `save_every` | 0 | 每 N 步强制存档（0 = 只在验证变好时存） |
+| `chat_mode` | `True` | `False` = 纯续写模型（诗词），提示词不加「用户：／助手：」 |
+| `chat_temperature` | 0.8 | 对话采样温度，越大越发散 |
+| `chat_top_k` | 40 | 只从概率最高的 K 个里采样；0 = 不截断 |
+| `chat_max_new` | 180 | 一次最多生成多少字 |
+
+`chat_*` 这几个是**对话参数**，训练时写进模型文件；`chat.py` 和 `http_server.py`
+加载模型时会按下面的优先级取用（改 properties 不用重训就生效）：
+
+```
+命令行显式参数  >  properties\<模型名>.properties  >  模型文件里存的  >  默认值
+```
 
 ---
 
@@ -565,6 +578,92 @@ ai_res\script\fetch_pretrain_corpus.bat --list
 
 ---
 
+## 训练一个写诗模型 dlqq_poem
+
+专门写诗的小模型：6 层 384 维（14.1 M 参数），语料是**古诗 + 宋词 + 近现代诗**，
+在 8 GB 显存上半小时左右训完。
+
+语料里**只有诗词正文，没有「诗：」「词：」这类标注**，所以它写出来的就是诗本身，
+不会把标注当内容复读。
+
+### 1. 下语料
+
+```bat
+REM 三个源都下（诗 43 MB + 词 19 MB + 近现代诗 57 MB）
+ai_res\script\fetch_poem_corpus.bat
+
+REM 只下某个源 / 先取 5 MB 试跑 / 看有哪些源
+ai_res\script\fetch_poem_corpus.bat --source modern
+ai_res\script\fetch_poem_corpus.bat --source shici songci
+ai_res\script\fetch_poem_corpus.bat --max-mb 5
+ai_res\script\fetch_poem_corpus.bat --list
+```
+
+| 源 | 仓库 | 大小 | 内容 |
+|---|---|---|---|
+| `shici` | `modelscope/chinese-poetry-collection` | 43.4 MB | 唐宋元明清诗 |
+| `songci` | `peaceminuczy/songci` | 18.7 MB | 宋词 |
+| `modern` | `Iess/chinese_modern_poetry`（国内镜像 hf-mirror.com） | 56.6 MB | 近现代诗（中国诗人 + 外国诗中译） |
+
+都会下载到 `src\dlqq_poem\`，输出 `shici-000.jsonl`、`songci-000.jsonl`、`modern-000.jsonl`，
+已有文件不覆盖、进度条、按句号断行排版。
+
+> 旧版本生成的语料每首带「诗：」「词：」前缀。脚本会检测这种文件并**停下提醒你删掉**
+> （`del src\dlqq_poem\*.jsonl`），否则新旧混在一起会把标注学进去。
+
+### 2. 训练
+
+```bat
+script\train.bat dlqq_poem
+```
+
+配置在 `properties\dlqq_poem.properties`，是按实际语料调过的：
+
+| 项 | 值 | 依据 |
+|---|---|---|
+| 结构 | 6 层 384 维（14.1 M） | 约 4000 万字 / 14 M 参数 ≈ 2.8 token/参数 |
+| `block_size` | 256 | 现代诗平均 210 字、90% 在 136 字内，256 能完整装下一首 |
+| `batch_size` | 32 | 32 × 256 = 每步 8192 token（与 64×128 步数相同，上下文翻倍） |
+| `max_iters` | 15000 | ≈ 1.23 亿 token ≈ 语料（3920 万 token）3.1 轮 |
+| `max_vocab` | 7000 | 覆盖 99.9% 以上的字 |
+| `chat_mode` | `false` | 告诉 `chat.py` 这是续写模型，别套「用户：／助手：」 |
+
+实测约 7.0 万 token/秒，**全程约 29 分钟**；每 2500 步存一次档（fp16）。
+
+### 3. 让它写
+
+语料是纯正文，所以对话就是**给它一个开头，它往下写**：
+
+```bat
+script\chat.bat dlqq_poem
+```
+
+```
+你  > 春
+它  > 风暖鸟声碎，日高花影重。
+      ...
+```
+
+- 输入一两个字 → 以它起句；
+- 输入一句诗 → 接着往下续；
+- 直接输入一段现代诗的句子 → 按现代诗的断行风格续写。
+
+因为 `chat_mode=false` 存在模型文件里，`chat.py` 会自动用续写模式，不会再加「用户：／助手：」。
+
+采样参数也放在 `properties\dlqq_poem.properties` 里，改完**不用重训**就生效：
+
+```properties
+chat_mode=false
+chat_temperature=1.0     # 小模型用 0.8 容易陷入「他的女人，他的女人」循环
+chat_top_k=0             # 0 = 不截断，从全词表采样
+chat_max_new=200
+```
+
+`script\chat.bat` 和 `script\http_server.bat` 加载这个模型时都会读这些值；
+临时想改，命令行加 `temperature=0.8 top_k=40` 就能覆盖。
+
+---
+
 ## 运行模式与显存
 
 每次开始训练或对话前，都会先报一次运行环境：
@@ -608,13 +707,14 @@ script/                   入口脚本（双击即用）
 properties/               训练配置（一行一个 key=value，改完即生效）
   chat_demo.properties    demo 配置（13.7 M 参数，语料来自 script\fetch_chat_demo.bat）
   dlqq_llm.properties     GB 级语料（src\dlqq_llm\）+ large 档
+  dlqq_poem.properties    写诗/词（src\dlqq_poem\，14.1 M 参数）
 
 ai_res/                   临时目录，放辅助脚本与中间产物，**已被 .gitignore 忽略**
   cache/                  切词缓存（每份语料一个 data-<指纹>.bin）
   doc/                    原始语料 / 下载的题库
-  script/                 辅助工具：语料导出、PDF 转换、出图、跑分、预训练语料下载等
+  script/                 辅助工具：语料导出、PDF 转换、出图、跑分、预训练/诗词语料下载等
 
-src/                      语料目录（每个语料一个文件夹，例如 src\chat_demo\、src\dlqq_llm\）
+src/                      语料目录（每个语料一个文件夹，如 src\chat_demo\、src\dlqq_poem\）
 model/                    模型目录（每个模型一个文件夹：model\chat_demo\chat_demo.pt）
 release/                  打包输出目录
 ```
