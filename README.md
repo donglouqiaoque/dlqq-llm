@@ -1,4 +1,8 @@
-# llm-train · 字符级 GPT 训练与对话
+# dlqq-llm-train · 字符级 GPT 训练与对话
+
+**中文** ｜ [English](README.en.md)
+
+预训练权重 ｜ [ModelScope 模型仓库](https://www.modelscope.cn/models/donglouqiaoque/dlqq-llm)
 
 一套从零实现的极小语言模型工具链：**不用 tokenizer、不用 HuggingFace**，
 语料进、模型出，训练完就能跟它聊天。
@@ -41,9 +45,15 @@
 
 想先确认环境是否装好，双击 `script\torch_check.bat`，它会逐项检查并在最后给出结论。
 
-> 自带两个配置：`chat_demo.properties`（考题库 demo，13.7 M 参数，几分钟）和
-> `dlqq_llm.properties`（`src\dlqq_llm\` 目录，GB 级语料）。对话默认用 `model\chat_demo\chat_demo.pt`。
+> 自带四个配置：`chat_demo`（30 条手写问答，0.9 M 参数，几十秒）、
+> `dlqq_exam`（4,562 条考题，13.7 M 参数，几分钟）、
+> `dlqq_llm`（GB 级语料，29.4 M 参数）、`dlqq_poem`（写诗填词，14.1 M 参数）。
+> 对话默认用 `model\chat_demo\chat_demo.pt`。
 > **语料或模型缺失时会直接终止**，并提示你怎么补上。
+>
+> **不想自己训**：训练好的权重在 [ModelScope 模型仓库](https://www.modelscope.cn/models/donglouqiaoque/dlqq-llm)，
+> 下载后按 `model\<名字>\<名字>.pt` 放好就能直接对话，各自的结构与语料说明见模型卡；
+> 每个权重都带同名 `.sha256`，可以先跑 `script\verify_signature.bat` 核对再加载。
 
 ---
 
@@ -130,8 +140,9 @@ python=D:\Soft\Python\Python3_13_9\python.exe
 ```
 Available configs:
   [1] chat_demo.properties
-  [2] dlqq_llm.properties
-  [3] dlqq_poem.properties
+  [2] dlqq_exam.properties
+  [3] dlqq_llm.properties
+  [4] dlqq_poem.properties
 
 Select a number (Enter = 1): 1
 ```
@@ -145,7 +156,7 @@ Select a number (Enter = 1): 1
   训练（配置文件：chat_demo.properties）
 [语料] src\chat_demo（目录，1 个文件）
 [输出] model\chat_demo\chat_demo.pt
-[参数] n_layer=6 n_head=6 n_embd=384 block_size=256 batch_size=32 max_iters=3000 ...
+[参数] n_layer=4 n_head=4 n_embd=128 block_size=128 batch_size=32 max_iters=3000 ...
 [环境] D:\Soft\Python\Python3_13_9\python.EXE
 ```
 
@@ -157,8 +168,9 @@ Select a number (Enter = 1): 1
 
 | 文件 | 语料 | 档位 | 说明 |
 |---|---|---|---|
-| `chat_demo.properties` | `src\chat_demo\` | medium（13.7 M 参数） | 考题库 demo，几分钟 |
-| `dlqq_llm.properties` | `src\dlqq_llm\` | large（33 M 参数） | GB 级语料，约 1 小时 |
+| `chat_demo.properties` | `src\chat_demo\` | small（约 0.9 M 参数） | 30 条手写问答，几十秒跑完 |
+| `dlqq_exam.properties` | `src\dlqq_exam\` | medium（13.7 M 参数） | 4,562 条考题，几分钟 |
+| `dlqq_llm.properties` | `src\dlqq_llm\` | large（29.4 M 参数） | GB 级语料，约 3 小时（60,000 步） |
 | `dlqq_poem.properties` | `src\dlqq_poem\` | small（14.1 M 参数） | 写诗（古诗+宋词+现代诗），约 30 分钟 |
 
 **所有参数都在文件里**，改完保存就生效，不需要碰代码：
@@ -167,7 +179,7 @@ Select a number (Enter = 1): 1
 |---|---|
 | `data_path` | 语料**目录**（相对工程根目录；目录里放 `txt` / `jsonl`，可以多个） |
 | `model` | 模型名（不用写 `.pt`，自动存到 `model\<名字>\<名字>.pt`） |
-| `cache_dir` | 切词缓存放哪（默认 `ai_res/cache`） |
+| `cache_dir` | 切词缓存放哪（默认 `.ai_res/cache`） |
 | `n_layer` / `n_head` / `n_embd` | 模型结构 |
 | `block_size` / `batch_size` | 上下文长度 / 每批条数 |
 | `max_iters` / `eval_interval` | 训练步数 / 多少步评估一次 |
@@ -299,14 +311,14 @@ python code\train_llm.py data_path=src\my_corpus out_path=model\我的模型\我
 ### 下载来的语料要先清洗
 
 从维基、fineweb 这类源下回来的东西不能直接喂（维基是 `{{模板}}` `[[链接]]`，网页语料混着英文和广告）。
-`ai_res\script\prepare_corpus.py` 负责转换和清洗：
+`.ai_res\script\prepare_corpus.py` 负责转换和清洗：
 
 ```bat
 REM 维基 dump（wikiextractor 的输出，每行一个 JSON）
-python ai_res\script\prepare_corpus.py --in ai_res\doc\zhwiki --out ai_res\doc\zhwiki.txt --wikitext
+python .ai_res\script\prepare_corpus.py --in .ai_res\doc\zhwiki --out .ai_res\doc\zhwiki.txt --wikitext
 
 REM parquet（fineweb 之类，自动找 text 列）
-python ai_res\script\prepare_corpus.py --in ai_res\doc\fineweb --out ai_res\doc\fineweb.txt --min-chars 100
+python .ai_res\script\prepare_corpus.py --in .ai_res\doc\fineweb --out .ai_res\doc\fineweb.txt --min-chars 100
 ```
 
 它会做：剥维基标记、统一空白、长度过滤（`--min-chars`）、中文占比过滤（`--min-zh`）、按行去重，
@@ -343,7 +355,7 @@ python code\train_llm.py n_layer=6 n_embd=384 lr=1e-3 max_iters=5000
 | `eval_interval` | 200 | 多少步评估一次、顺便决定要不要保存 |
 | `max_vocab` | 8000 | 词表上限，只保留最常出现的前 N 个字 |
 | `val_frac` | 0.05 | 从语料尾部切这个比例做验证集 |
-| `cache_dir` | `ai_res/cache` | 切好词的二进制缓存放这里（临时文件统一进 `ai_res`） |
+| `cache_dir` | `.ai_res/cache` | 切好词的二进制缓存放这里（临时文件统一进 `.ai_res`） |
 | `prompt` | 空 | 训练结束采样用的开头；留空自动挑 |
 | `data_format` | `auto` | `auto` / `txt` / `jsonl`；auto 看扩展名和文件开头 |
 | `q_field` | 空 | jsonl 里「问」的字段名；留空自动推断 |
@@ -388,37 +400,36 @@ python code\train_llm.py n_layer=6 n_embd=384 lr=1e-3 max_iters=5000
 
 ---
 
-## 做一个小体积的答题 demo
+## 做一个小体积的考题 demo（dlqq_exam）
 
-仓库体积有限（Gitee 单文件 50 MB），原来那份 5 K 字的演示语料互动性很弱。
-`chat_demo` 现在用**考题库**当语料：同样体积下信息密度高得多，demo 立刻变得能玩。
+仓库体积有限（Gitee 单文件 50 MB）。`chat_demo` 是 30 条手写问答（13 KB），
+跑通流程够用，但互动性弱；`dlqq_exam` 改用**考题库**当语料，同样体积下信息密度高得多。
 
 两步：
 
 ```bat
-REM 1) 下载考题（魔搭：C-Eval + 高考 + 生物），
-REM    直接写成 demo 语料 src\chat_demo\chat_demo.jsonl
+REM 1) 下载考题（魔搭：C-Eval + 高考 + 生物），写成 src\dlqq_exam\dlqq_exam.jsonl
 script\fetch_chat_demo.bat
 
-REM 2) 训练 + 聊天（配置就是原来的 chat_demo，没有新增配置）
-script\train.bat chat_demo
-script\chat.bat
+REM 2) 训练 + 聊天
+script\train.bat dlqq_exam
+script\chat.bat dlqq_exam
 ```
 
-体积控制在 50 MB 以内的关键是 `properties\chat_demo.properties` 里这两行：
+体积控制在 50 MB 以内的关键是 `properties\dlqq_exam.properties` 里这两行：
 
 ```properties
 save_dtype=fp16        # 权重存半精度，体积减半
 save_optimizer=false   # 不存优化器状态，再省一半（demo 不需要续训）
 ```
 
-实测：3.24 M 参数，fp32 + 优化器 31 MB → fp16 无优化器 **6.2 MB**；
-10.76 M 参数（6 层 384 维，小词表）→ **20.6 MB**。按这个比例，13.7 M 参数的
-demo 模型约 **27 MB**，塞进 50 MB 没问题。
+实测：4,562 条语料切出约 270 万 token，13.7 M 参数存成 fp16 + 无优化器约 **27 MB**；
+`chat_demo` 更小，0.9 M 参数约 **1.9 MB**。
 
-> **⚠ 数据来源要写明**：demo 把题库全部用于训练，模型是**记住了这些题**，
+> **⚠ 数据来源要写明**：`dlqq_exam` 把题库全部用于训练，模型是**记住了这些题**，
 > 所以要标注语料来源（魔搭上的 C-Eval / gaokao-benchmark 等），
 > 并且**不要**把同一批题当 benchmark 报分数 —— 那是自问自答，不是能力。
+> 另外 C-Eval 的许可是 CC BY-NC-SA 4.0（非商业），这份语料不要随仓库公开分发。
 
 ### 语料从哪来（全部走魔搭，国内直连）
 
@@ -438,8 +449,8 @@ demo 模型约 **27 MB**，塞进 50 MB 没问题。
 REM 考题：用自带脚本，直连魔搭，不需要 GitHub / HuggingFace / 登录
 script\fetch_chat_demo.bat --datasets c-eval gaokao bio
 
-REM 预训练大语料：用 ai_res\script 下的脚本，按需取多少 MB（HTTP Range，不整包下）
-ai_res\script\fetch_pretrain_corpus.bat --source mix --max-mb 2000
+REM 预训练大语料：用 .ai_res\script 下的脚本，按需取多少 MB（HTTP Range，不整包下）
+.ai_res\script\fetch_pretrain_corpus.bat --source mix --max-mb 2000
 ```
 
 `fetch_pretrain_corpus.bat` 会把清洗后的文本写成 jsonl 直接放进 `src\dlqq_llm\`，
@@ -448,7 +459,7 @@ ai_res\script\fetch_pretrain_corpus.bat --source mix --max-mb 2000
 ### 预训练语料有多大？为什么默认只下 2 GB？
 
 ```bat
-ai_res\script\fetch_pretrain_corpus.bat --list
+.ai_res\script\fetch_pretrain_corpus.bat --list
 ```
 
 ```
@@ -465,10 +476,10 @@ fineweb  AI-ModelScope/chinese-fineweb-edu
 
 默认 2 GB 是按模型规模算的：
 
-- `dlqq_llm` 是 33 M 参数，按「每参数 20 token」≈ **6.6 亿 token** 就够；
+- `dlqq_llm` 是 29.4 M 参数，按「每参数 20 token」≈ **5.9 亿 token** 就够；
 - 2 GB 中文文本 ≈ 7 亿 token，加上原来的 `firefly-train-1.1M.jsonl`（1.1 GB ≈ 4 亿 token），
   总量约 11 亿 token，已经超过所需；
-- 全下 12.7 GB 对 33 M 模型没有收益，只是多花 1–2 小时下载和 13 GB 硬盘。
+- 全下 12.7 GB 对 29.4 M 模型没有收益，只是多花 1–2 小时下载和 13 GB 硬盘。
 
 真要全量就传 `--max-mb 0`（一直下到结束），或者用 `--max-mb 8000` 取 8 GB。
 
@@ -480,7 +491,7 @@ fineweb  AI-ModelScope/chinese-fineweb-edu
 吃掉十几 GB —— 所以数据管线是**流式**的：
 
 ```
-分块读 → numpy 统计字频 → 取前 max_vocab 个字 → 分块编码成 uint16 → 写 ai_res\cache\data.bin
+分块读 → numpy 统计字频 → 取前 max_vocab 个字 → 分块编码成 uint16 → 写 .ai_res\cache\data.bin
 训练时 np.memmap 内存映射，随机读几 KB
 ```
 
@@ -532,15 +543,15 @@ python code\train_llm.py data_path=src\dlqq_llm out_path=model\dlqq_llm\dlqq_llm
 两点注意：
 
 - 每份语料（连同 `max_vocab` / `val_frac` / 格式 / 字段这些设置）对应一个独立缓存文件
-  `ai_res\cache\data-<指纹>.bin`，改任何一项都会自动写一份新的。
+  `.ai_res\cache\data-<指纹>.bin`，改任何一项都会自动写一份新的。
   所以 demo 的 `chat_demo\` 和 GB 级的 `dlqq_llm\` 可以**同时留着**，
-  来回切换不用重新切词；想全部重来就删 `ai_res\cache\`；
+  来回切换不用重新切词；想全部重来就删 `.ai_res\cache\`；
 - 验证集是从**语料尾部**切的。语料若按类别顺序排列（比如前半新闻、后半对话），
   建议先打乱行序，否则验证损失反映不了真实水平。
 
 ### 加语料：往目录里丢文件就行
 
-`data_path` 既可以是**文件**，也可以是**目录**。`dlqq_llm.properties` 现在指向目录：
+`data_path` 只接受**目录**（传文件会直接报错并打印迁移命令）。`dlqq_llm.properties` 指向：
 
 ```properties
 data_path=src/dlqq_llm
@@ -557,19 +568,19 @@ data_path=src/dlqq_llm
 
 新增/删除/改动文件后，缓存指纹会变，**下次训练自动重新切词**，不用手动删缓存。
 
-扩充语料用 `ai_res\script\fetch_pretrain_corpus.bat`（魔搭直连，不需要 GitHub / HuggingFace / 登录）：
+扩充语料用 `.ai_res\script\fetch_pretrain_corpus.bat`（魔搭直连，不需要 GitHub / HuggingFace / 登录）：
 
 ```bat
 REM 默认：混合语料（网页+新闻+维基+百科，已清洗）取 2 GB，写进 src\dlqq_llm\
-ai_res\script\fetch_pretrain_corpus.bat
+.ai_res\script\fetch_pretrain_corpus.bat
 
 REM 只取 500 MB 先试；换教育向网页语料；或者全下
-ai_res\script\fetch_pretrain_corpus.bat --max-mb 500
-ai_res\script\fetch_pretrain_corpus.bat --source fineweb --max-mb 4000
-ai_res\script\fetch_pretrain_corpus.bat --max-mb 0
+.ai_res\script\fetch_pretrain_corpus.bat --max-mb 500
+.ai_res\script\fetch_pretrain_corpus.bat --source fineweb --max-mb 4000
+.ai_res\script\fetch_pretrain_corpus.bat --max-mb 0
 
 REM 看有哪些语料、各有多大
-ai_res\script\fetch_pretrain_corpus.bat --list
+.ai_res\script\fetch_pretrain_corpus.bat --list
 ```
 
 它会做长度过滤、中文占比过滤、按行去重，输出 `pretrain-mix-000.jsonl`、`pretrain-mix-001.jsonl`……
@@ -590,13 +601,13 @@ ai_res\script\fetch_pretrain_corpus.bat --list
 
 ```bat
 REM 三个源都下（诗 43 MB + 词 19 MB + 近现代诗 57 MB）
-ai_res\script\fetch_poem_corpus.bat
+.ai_res\script\fetch_poem_corpus.bat
 
 REM 只下某个源 / 先取 5 MB 试跑 / 看有哪些源
-ai_res\script\fetch_poem_corpus.bat --source modern
-ai_res\script\fetch_poem_corpus.bat --source shici songci
-ai_res\script\fetch_poem_corpus.bat --max-mb 5
-ai_res\script\fetch_poem_corpus.bat --list
+.ai_res\script\fetch_poem_corpus.bat --source modern
+.ai_res\script\fetch_poem_corpus.bat --source shici songci
+.ai_res\script\fetch_poem_corpus.bat --max-mb 5
+.ai_res\script\fetch_poem_corpus.bat --list
 ```
 
 | 源 | 仓库 | 大小 | 内容 |
@@ -696,25 +707,29 @@ code/                     训练与对话脚本
 script/                   入口脚本（双击即用）
   train.bat               训练（列出 properties\ 里的配置让你选）
   chat.bat                进入对话
-  fetch_chat_demo.bat     下载考题库、生成 demo 语料（魔搭，国内直连）
+  fetch_chat_demo.bat     下载考题库、生成 dlqq_exam 语料（魔搭，国内直连）
   torch_check.bat         环境自检
   http_server.bat         启动桥接服务（供 DSH 接入）
   train_chat_helper.py    上面几个 bat 的交互逻辑
   fetch_chat_demo.py      考题下载与格式转换
   torch_check.py          自检的具体检查项
   http_server.py          桥接服务本体（OpenAI 兼容，独立自足）
+  model_signature.py      权重签名：计算 / 校验 SHA-256（只用标准库，不需要 torch）
+  compute_signature.bat   双击：给 model\ 下所有 .pt 生成签名
+  verify_signature.bat    双击：校验签名
 
 properties/               训练配置（一行一个 key=value，改完即生效）
-  chat_demo.properties    demo 配置（13.7 M 参数，语料来自 script\fetch_chat_demo.bat）
+  chat_demo.properties    30 条手写问答（0.9 M 参数，small 档）
+  dlqq_exam.properties    4,562 条考题（13.7 M 参数，语料来自 script\fetch_chat_demo.bat）
   dlqq_llm.properties     GB 级语料（src\dlqq_llm\）+ large 档
   dlqq_poem.properties    写诗/词（src\dlqq_poem\，14.1 M 参数）
 
-ai_res/                   临时目录，放辅助脚本与中间产物，**已被 .gitignore 忽略**
+.ai_res/                   临时目录，放辅助脚本与中间产物，**已被 .gitignore 忽略**
   cache/                  切词缓存（每份语料一个 data-<指纹>.bin）
   doc/                    原始语料 / 下载的题库
   script/                 辅助工具：语料导出、PDF 转换、出图、跑分、预训练/诗词语料下载等
 
-src/                      语料目录（每个语料一个文件夹，如 src\chat_demo\、src\dlqq_poem\）
+src/                      语料目录（每个语料一个文件夹，如 src\chat_demo\、src\dlqq_exam\）
 model/                    模型目录（每个模型一个文件夹：model\chat_demo\chat_demo.pt）
 release/                  打包输出目录
 ```
@@ -786,6 +801,12 @@ python code\train_llm.py data_path=src\chat_demo out_path=model\chat_demo\chat_d
 
 能，但会很慢，而且 CPU 上不会启用 bf16（反而更慢）。建议至少 `tiny` 档位先跑通流程。
 
+**Q：怎么确认权重文件没被改过、没传坏？**
+
+双击 `script\verify_signature.bat`：它扫描 `model\` 下所有 `.pt`，逐个重算 SHA-256，
+和旁边的 `<名字>.pt.sha256` 比对，四个都 PASS 才算没问题。训练完、或把权重传到模型仓库
+之前跑一次。签名用 `script\compute_signature.bat` 重新生成（改过权重后必须重新生成）。
+
 ---
 
 ## 把模型接进 DSH
@@ -799,10 +820,11 @@ python code\train_llm.py data_path=src\chat_demo out_path=model\chat_demo\chat_d
 下的所有 `.pt`，启动时只列清单，**一个都不加载**：
 
 ```
-[清单] 共 3 个模型（现在不加载，谁被调用才加载谁）
-       chat_demo                     3.6 MB  10-17 16:25  ← 默认
-       dlqq_llm                    117.9 MB  10-17 17:27
-       chat_demo_exam               27.0 MB  10-19 11:40
+[清单] 共 4 个模型（现在不加载，谁被调用才加载谁）
+       chat_demo                     1.9 MB  10-27 09:42  ← 默认
+       dlqq_exam                    27.6 MB  10-27 09:53
+       dlqq_llm                    337.1 MB  10-20 10:04
+       dlqq_poem                   133.3 MB  10-20 14:29
 ```
 
 谁被 DSH 真正调用，才把谁读进显存；切到另一个模型时，上一个自动卸载
@@ -878,8 +900,8 @@ python script\http_server.py --help         REM 看全部参数
 | 限制 | 说明 |
 |---|---|
 | 不会调用工具 | 请求里带的工具定义会被忽略，模型只回文本；它不会读文件、不会跑命令 |
-| 上下文很短 | 默认档位只有 128 字元（`block_size`）。**DSH 一条 agent 消息通常有 2000 字以上**，所以模型实际只看到最后那一小段 |
-| 回答质量受限 | demo 模型约 13.7 M 参数，训练自考题库（魔搭：C-Eval / 高考 / 生物），**能答题库里的题，但换个问法就露馅**；它没有推理能力，只是把语料背下来了 |
+| 上下文很短 | `chat_demo` 的 `block_size` 只有 128 字（`dlqq_exam` 是 256）。**DSH 一条 agent 消息通常有 2000 字以上**，所以模型实际只看到最后那一小段 |
+| 回答质量受限 | `chat_demo` 只有 0.9 M 参数 / 30 条问答，基本在复述；`dlqq_exam` 13.7 M 参数，训练自考题库（魔搭：C-Eval / 高考 / 生物），**能答题库里的题，换个问法就露馅**；两者都没有推理能力 |
 | 不是 agent 模型 | 它只会接着你的话往下写，不会规划、不会分步执行任务 |
 
 > 结论：**接进 DSH 用来验证链路 —— 请求发得出、模型收得到、回答回得来 —— 是完全可行的**。

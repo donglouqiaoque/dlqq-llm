@@ -1,13 +1,13 @@
 @echo off
 REM ===================================================================
 REM  Download Chinese exam datasets from ModelScope (modelscope.cn)
-REM  and build the chat_demo corpus folder.
+REM  and build the dlqq_exam corpus folder.
 REM
 REM  Domestic only: no GitHub, no HuggingFace, no login needed.
 REM
 REM  Double-click it. Output:
-REM     src\chat_demo\chat_demo.jsonl     demo corpus (all questions)
-REM     ai_res\doc\exam\exam_eval.jsonl   eval split, if any
+REM     src\dlqq_exam\dlqq_exam.jsonl      exam corpus (all questions)
+REM     .ai_res\doc\exam\exam_eval.jsonl   eval split, if any
 REM
 REM  Optional: fetch_chat_demo.bat --datasets c-eval gaokao bio
 REM            fetch_chat_demo.bat --list
@@ -39,8 +39,8 @@ set "PYTHONIOENCODING=utf-8"
 
 echo [python]  %PY%
 echo [source]  ModelScope (modelscope.cn)
-echo [output]  src\chat_demo\chat_demo.jsonl  (demo corpus folder)
-echo           ai_res\doc\exam               (raw files + eval split)
+echo [output]  src\dlqq_exam\dlqq_exam.jsonl   (exam corpus folder)
+echo           .ai_res\doc\exam               (raw files + eval split)
 echo.
 
 set "ARGS="
@@ -51,15 +51,15 @@ shift
 goto collect
 
 :run
-"%PY%" "%SCRIPT%" --out ai_res\doc\exam --all-to-train --single src\chat_demo\chat_demo.jsonl %ARGS%
+"%PY%" "%SCRIPT%" --out .ai_res\doc\exam --all-to-train --single src\dlqq_exam\dlqq_exam.jsonl %ARGS%
 set "RC=%ERRORLEVEL%"
 
 echo.
-if "%RC%"=="0" echo [done] see src\chat_demo\chat_demo.jsonl
+if "%RC%"=="0" echo [done] see src\dlqq_exam\dlqq_exam.jsonl
 if not "%RC%"=="0" echo [exit code %RC%]
 echo.
-echo REMINDER: the demo trains on these questions, so label the source
-echo           in README (ModelScope: C-Eval / gaokao-benchmark / ...).
+echo REMINDER: the exam corpus is trained on these questions, so label the
+echo           source (ModelScope: C-Eval / gaokao-benchmark / ...).
 echo           Do NOT report benchmark scores on the same questions.
 pause
 exit /b %RC%

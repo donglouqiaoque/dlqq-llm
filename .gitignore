@@ -2,7 +2,7 @@
 # 忽略idea自身
 .idea
 # 忽略缓存与资源目录
-ai_res/*
+.ai_res/*
 # 忽略除chat_demo以外的模型（模型文件太大Gitee不让上传）
 model/*
 src/*
@@ -17,4 +17,6 @@ script/logo.ico
 !.gitkeep
 # 排除chat_demo模型
 !chat_demo*
+# 排除配置文件
+!properties/*
 #-------------------------

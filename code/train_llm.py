@@ -16,11 +16,11 @@
     python code\\train_llm.py data_path=src\\chat_demo out_path=model\\chat_demo.pt max_iters=3000
 
 吃一整份大语料（txt 或 jsonl 都行，第一次运行会先花些时间切词，之后自动复用 cache）：
-    python code\\train_llm.py data_path=ai_res\\doc\\firefly-train-1.1M.jsonl out_path=model\\firefly.pt ^
+    python code\\train_llm.py data_path=.ai_res\\doc\\firefly-train-1.1M.jsonl out_path=model\\firefly.pt ^
         max_vocab=8000 n_layer=8 n_head=8 n_embd=512 block_size=256 batch_size=32 max_iters=60000
 
 jsonl 里会自动找问答字段（input/target、Q/A、question/answer、src/tgt …），
-也可以用 q_field= 和 a_field= 显式指定。切词缓存放 ai_res\\cache\\。
+也可以用 q_field= 和 a_field= 显式指定。切词缓存放 .ai_res\\cache\\。
 """
 import os, sys, math, time, json, hashlib, urllib.request
 
@@ -66,7 +66,7 @@ CONFIG = dict(
     # ---- 大语料相关 ----
     max_vocab   = 8000,      # 词表上限：只保留最常出现的前 N 个字符
     val_frac    = 0.05,      # 从语料尾部切这个比例做验证集
-    cache_dir   = "ai_res/cache",   # 切好的二进制缓存放这里（临时文件统一放 ai_res）
+    cache_dir   = ".ai_res/cache",   # 切好的二进制缓存放这里（临时文件统一放 .ai_res）
     prompt      = "",        # 训练结束采样用的开头；留空则自动挑
     # ---- 语料格式 ----
     data_format = "auto",    # auto / txt / jsonl；auto 按扩展名和文件开头判断

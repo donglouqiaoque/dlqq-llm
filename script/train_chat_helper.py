@@ -747,7 +747,7 @@ def do_train(profile_name=None, iters=None, corpus=None):
 # ==================================================================
 def list_models():
     """可用模型：model\\ 下的（含子目录）、release\\ 下的、工程根目录的。
-    不扫 ai_res\\ —— 那是临时目录，里面的半成品不该出现在选择列表里。"""
+    不扫 .ai_res\\ —— 那是临时目录，里面的半成品不该出现在选择列表里。"""
     models = []
     for d in ("model", "release"):
         base = os.path.join(ROOT, d)

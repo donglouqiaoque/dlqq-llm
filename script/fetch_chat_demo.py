@@ -14,9 +14,9 @@
 
 用法（也可以直接双击 script\\fetch_chat_demo.bat）：
     python script\\fetch_chat_demo.py --list          （看有哪些）
-    python script\\fetch_chat_demo.py --out ai_res\\doc\\exam
-    python script\\fetch_chat_demo.py --out ai_res\\doc\\exam --datasets c-eval gaokao
-    python script\\fetch_chat_demo.py --from-dir ai_res\\doc\\exam --out ai_res\\doc\\exam
+    python script\\fetch_chat_demo.py --out .ai_res\\doc\\exam
+    python script\\fetch_chat_demo.py --out .ai_res\\doc\\exam --datasets c-eval gaokao
+    python script\\fetch_chat_demo.py --from-dir .ai_res\\doc\\exam --out .ai_res\\doc\\exam
 
 产出（--out 目录下）：
     exam_train.jsonl   训练用（用户：…／助手：…）
@@ -364,7 +364,7 @@ def convert(raw_dir, out_dir, max_per_set=0, all_to_train=False, single=None):
 
 def main():
     ap = argparse.ArgumentParser(description="从魔搭下载考题数据集并转成 jsonl")
-    ap.add_argument("--out", required=True, help="输出目录，例如 ai_res\\doc\\exam")
+    ap.add_argument("--out", required=True, help="输出目录，例如 .ai_res\\doc\\exam")
     ap.add_argument("--datasets", nargs="*", default=None,
                     help=f"要下哪些（默认 {' '.join(DEFAULT_SET)}）")
     ap.add_argument("--from-dir", default=None, help="跳过下载，直接转换这个目录里已有的文件")
