@@ -19,10 +19,10 @@ dlqq-llm-train 训练出来的权重放在 model\<名字>\<名字>.pt。本脚�
 不进版本库，属于本地校验用。
 
 用法（在仓库根目录执行）：
-    python script\model_signature.py --mode compute        # 生成/更新全部签名
-    python script\model_signature.py --mode verify         # 校验全部
-    python script\model_signature.py --mode verify --file model\dlqq_poem\dlqq_poem.pt
-    python script\model_signature.py --mode compute --quiet
+    python script\sign\create\model_signature.py --mode compute        # 生成/更新全部签名
+    python script\sign\create\model_signature.py --mode verify         # 校验全部
+    python script\sign\create\model_signature.py --mode verify --file model\dlqq_poem\dlqq_poem.pt
+    python script\sign\create\model_signature.py --mode compute --quiet
 
 也可以直接双击：
     script\compute_signature.bat      生成签名
@@ -331,6 +331,8 @@ def main():
     ap.add_argument("--file", action="append", default=[], metavar="PT",
                     help="只处理指定的 .pt（可写多次；相对路径按仓库根解析）")
     ap.add_argument("--quiet", action="store_true", help="不显示进度条")
+    ap.add_argument("--parent-pid", type=int, default=0,
+                    help="父进程 pid（WebUI 传入时用来判断是否已被关闭）")
     a = ap.parse_args()
 
     root = os.path.abspath(a.root) if a.root else find_root(HERE)

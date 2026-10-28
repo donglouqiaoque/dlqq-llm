@@ -9,14 +9,14 @@
 **内存占用与语料大小无关**，只跟 block_size / batch_size 有关。
 
 用法（在工程根目录执行）：
-    python code\\train_llm.py                                  # 用默认配置，自动下载 TinyShakespeare
-    python code\\train_llm.py max_iters=500 n_layer=2 n_embd=64  # 命令行覆盖任意配置
+    python code\\train.py                                  # 用默认配置，自动下载 TinyShakespeare
+    python code\\train.py max_iters=500 n_layer=2 n_embd=64  # 命令行覆盖任意配置
 
 用工程自带的演示语料（这是 script\\train.bat 实际执行的命令）：
-    python code\\train_llm.py data_path=src\\chat_demo out_path=model\\chat_demo.pt max_iters=3000
+    python code\\train.py data_path=src\\chat_demo out_path=model\\chat_demo.pt max_iters=3000
 
 吃一整份大语料（txt 或 jsonl 都行，第一次运行会先花些时间切词，之后自动复用 cache）：
-    python code\\train_llm.py data_path=.ai_res\\doc\\firefly-train-1.1M.jsonl out_path=model\\firefly.pt ^
+    python code\\train.py data_path=.ai_res\\doc\\firefly-train-1.1M.jsonl out_path=model\\firefly.pt ^
         max_vocab=8000 n_layer=8 n_head=8 n_embd=512 block_size=256 batch_size=32 max_iters=60000
 
 jsonl 里会自动找问答字段（input/target、Q/A、question/answer、src/tgt …），
@@ -101,26 +101,83 @@ CONFIG = dict(
 
 URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 
-def apply_cli_overrides():
-    for arg in sys.argv[1:]:
-        if "=" not in arg:
-            continue
-        k, v = arg.split("=", 1)
-        if k not in CONFIG:
-            print(f"[警告] 未知配置项 {k}，忽略"); continue
-        cur = CONFIG[k]
-        if isinstance(cur, bool):
-            # 布尔项必须显式识别，否则 "False" 也会被当成真
-            v2 = v.strip().lower() in ("1", "true", "yes", "y", "on")
-        else:
-            try:
-                v2 = int(v) if isinstance(cur, int) else float(v) if isinstance(cur, float) else v
-            except ValueError:
-                v2 = v
-        CONFIG[k] = v2
-        print(f"[覆盖] {k} = {v2}")
+# ------------------------------------------------------------------
+# 命令行：--config 读 properties；key=value 覆盖单项；--check-config 只校验不训练
+# ------------------------------------------------------------------
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import common                                                  # noqa: E402
 
-apply_cli_overrides()      # ← 必须调用，否则命令行覆盖不生效
+ROOT = common.find_root()
+
+
+def _parse_argv(argv):
+    cfg_file, parent_pid, check_only = None, 0, False
+    overrides = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--config", "-c") and i + 1 < len(argv):
+            i += 1
+            cfg_file = argv[i]
+        elif a.startswith("--config="):
+            cfg_file = a.split("=", 1)[1]
+        elif a == "--check-config":
+            check_only = True
+        elif a == "--parent-pid" and i + 1 < len(argv):
+            i += 1
+            try:
+                parent_pid = int(argv[i])
+            except ValueError:
+                parent_pid = 0
+        elif a.startswith("--parent-pid="):
+            try:
+                parent_pid = int(a.split("=", 1)[1])
+            except ValueError:
+                parent_pid = 0
+        elif a in ("-h", "--help"):
+            print(__doc__)
+            sys.exit(0)
+        elif "=" in a and not a.startswith("-"):
+            overrides.append(tuple(a.split("=", 1)))
+        else:
+            print(f"[用法] 不认识的参数：{a}")
+            sys.exit(2)
+        i += 1
+    return cfg_file, parent_pid, check_only, overrides
+
+
+_CFG_FILE, _PARENT_PID, _CHECK_ONLY, _OVERRIDES = _parse_argv(sys.argv[1:])
+
+if _CFG_FILE:
+    _cfg_path = common.resolve_path(ROOT, _CFG_FILE)
+    _props = common.load_properties(_cfg_path)
+    if not _props:
+        print(f"[错误] 配置文件为空或读不到：{_cfg_path}")
+        sys.exit(1)
+    _ignored = common.apply_properties(CONFIG, _props, root=ROOT)
+    print(f"[配置] 已加载 {os.path.basename(_cfg_path)}"
+          + (f"（忽略 {', '.join(sorted(_ignored))}）" if _ignored else ""))
+
+for _k, _v in _OVERRIDES:
+    if _k not in CONFIG:
+        print(f"[警告] 未知配置项 {_k}，忽略")
+        continue
+    try:
+        CONFIG[_k] = common.coerce_like(_v, CONFIG[_k])
+    except (TypeError, ValueError):
+        print(f"[警告] 配置项 {_k}={_v!r} 类型不对，忽略")
+        continue
+    print(f"[覆盖] {_k} = {CONFIG[_k]}")
+
+if _CHECK_ONLY:
+    print("[配置] 关键参数：")
+    for _key in ("data_path", "out_path", "n_layer", "n_head", "n_embd", "block_size",
+                 "batch_size", "max_iters", "max_vocab", "val_frac", "resume", "cache_dir"):
+        print(f"        {_key} = {CONFIG[_key]}")
+    sys.exit(0)
+
+if _PARENT_PID:
+    common.start_parent_watchdog(_PARENT_PID)
 
 # ==================================================================
 # 1) 数据：字符级词表 + 一次性切成二进制（内存占用与语料大小无关）
@@ -582,7 +639,9 @@ def get_batch(split):
         raise RuntimeError(
             f"[{split}] 可用 token 只剩 {len(d)} 个，装不下 block_size={T} 的一段。"
             f"请把 block_size 调小，或者换更大的语料。")
-    ix = np.random.randint(0, len(d) - T - 1, size=B)
+    # dtype 必须写 int64：Windows 上 np.random.randint 默认走 int32，
+    # 语料超过 21 亿 token 时直接报 "high is out of bounds for int32"
+    ix = np.random.randint(0, len(d) - T - 1, size=B, dtype=np.int64)
     x = np.stack([d[i:i + T] for i in ix]).astype(np.int64)
     y = np.stack([d[i + 1:i + T + 1] for i in ix]).astype(np.int64)   # 目标是「下一个字符」
     return (torch.from_numpy(x).to(DEVICE),

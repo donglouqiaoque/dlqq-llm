@@ -23,10 +23,10 @@ r"""把训练好的模型起成一个 OpenAI 兼容的 HTTP 服务（桥接服�
     · 只做基本对话，不支持图片。
 
 用法（在工程根目录执行）：
-    python script\http_server.py
-    python script\http_server.py --model model\chat_demo\chat_demo.pt --port 49128
-    python script\http_server.py --served-name my-model --device cpu
-或者直接双击 script\http_server.bat。
+    python script\chat\http\http_server.py
+    python script\chat\http\http_server.py --model model\chat_demo\chat_demo.pt --port 49128
+    python script\chat\http\http_server.py --served-name my-model --device cpu
+或者直接双击 script\chat\http\http_server.bat。
 """
 import os
 import re
@@ -115,10 +115,10 @@ _relaunch_if_no_torch()
 
 
 def find_root(start):
-    """往上找到含 code\train_llm.py 的那一级，作为工程根目录"""
+    """往上找到含 code\train.py 的那一级，作为工程根目录"""
     cur = start
     for _ in range(6):
-        if os.path.isfile(os.path.join(cur, "code", "train_llm.py")):
+        if os.path.isfile(os.path.join(cur, "code", "train.py")):
             return cur
         parent = os.path.dirname(cur)
         if parent == cur:
@@ -214,9 +214,8 @@ def load_model(path, device=None):
 # ==================================================================
 def read_model_props(path):
     r"""读 properties\<模型名>.properties 里的对话设置（改完不用重训就生效）"""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     stem = os.path.splitext(os.path.basename(path))[0]
-    p = os.path.join(root, "properties", stem + ".properties")
+    p = os.path.join(ROOT, "properties", stem + ".properties")
     out = {}
     if not os.path.isfile(p):
         return out
@@ -645,6 +644,9 @@ class Handler(BaseHTTPRequestHandler):
         cid = "chatcmpl-" + uuid.uuid4().hex[:24]
         created = int(time.time())
         print(f"  → [{model_id}] 轮数 {turns} | 提示 {len(prompt)} 字 | 生成 {len(text)} 字 | {dt:.2f}s", flush=True)
+        emit_event(t="chat", model=model_id, turns=turns, ms=int(dt * 1000),
+                   user=_last_user_text(req), assistant=text,
+                   prompt_chars=len(prompt), stream=bool(req.get("stream")))
 
         if req.get("stream"):
             self.send_response(200)
@@ -715,10 +717,37 @@ class Handler(BaseHTTPRequestHandler):
 ARGS = None
 POOL = None
 WARNED_TOOLS = False
+EMIT_EVENTS = False
+
+
+def _last_user_text(req):
+    """取客户端消息里最后一条 user 的纯文本，供事件回显用。"""
+    for m in reversed(req.get("messages") or []):
+        if m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, list):
+                c = "".join(p.get("text", "") for p in c if isinstance(p, dict))
+            return c or ""
+    return ""
+
+
+def emit_event(**kw):
+    """给 WebUI 的事件行：stdout 打一行 `@@EV@@ {...}`，由读线程按前缀识别。"""
+    if not EMIT_EVENTS:
+        return
+    try:
+        print("@@EV@@ " + json.dumps(kw, ensure_ascii=False), flush=True)
+    except (OSError, ValueError):
+        pass
+
+
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import common                                                     # noqa: E402
 
 
 def main():
-    global ARGS, POOL
+    global ARGS, POOL, EMIT_EVENTS
     ap = argparse.ArgumentParser(description="把训练好的模型起成 OpenAI 兼容服务（支持多模型）")
     ap.add_argument("--model", action="append", default=[],
                     help="额外指定 .pt 文件（可写多次）；默认自动扫 model\\ 和 release\\")
@@ -745,6 +774,10 @@ def main():
                     help="带 tools 的请求直接返回 400（默认是忽略 tools 并正常回答）")
     ap.add_argument("--debug", action="store_true",
                     help="把客户端发来的消息与拼出的提示词打印出来（排查用）")
+    ap.add_argument("--events", action="store_true",
+                    help="每完成一次对话就往 stdout 打一行 @@EV@@ JSON（供 WebUI 显示会话）")
+    ap.add_argument("--parent-pid", type=int, default=0,
+                    help="父进程 pid；父进程退出时本进程自动退出（供 WebUI 调用）")
     a = ap.parse_args()
 
     # ---- 收集模型清单 ----
@@ -789,6 +822,9 @@ def main():
             a.device = "cpu"
 
     ARGS = a
+    EMIT_EVENTS = bool(getattr(a, "events", False))
+    if getattr(a, "parent_pid", 0):
+        common.start_parent_watchdog(a.parent_pid)
     POOL = ModelPool(reg, a.device, a.max_loaded, a)
 
     print("=" * 68)

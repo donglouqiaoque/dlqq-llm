@@ -1,263 +1,283 @@
 # -*- coding: utf-8 -*-
-"""
-跟你自己训练的模型对话
-=====================
+r"""对话核心（WebUI 与命令行共用）
+================================================================
+本文件既是模块也是脚本：
+    · 被 WebUI 调用时用 ChatSession —— 加载一次、反复对话、可流式取字；
+    · 直接运行时就是原来的命令行对话（保留给调试用，不是给用户的入口）。
+
 用法（在工程根目录执行）：
-    python code/chat.py model/chat_demo.pt                      # 交互式对话
-    python code/chat.py model=model/chat_demo.pt                # 同上，key=value 写法
-    python code/chat.py model/chat_demo.pt --once "用户：你好"    # 只生成一次就退出
+    python code\chat.py model\chat_demo\chat_demo.pt
+    python code\chat.py model=model\chat_demo\chat_demo.pt
+    python code\chat.py model/chat_demo.pt --once "你好"
 
-单独一个不带 "=" 的参数会被当成模型路径；其它可覆盖的配置键有
-model / temperature / top_k / max_new / chat_mode / device。
+可覆盖的配置键：model / temperature / top_k / max_new / chat_mode / device。
+优先级：命令行显式 > properties\<模型名>.properties > 模型文件里存的 > 默认值。
 
-交互式里可以用的命令：
-    :q            退出
-    :t 0.7        改温度（越小越保守，越大越野）
-    :n 200        改生成长度
-    :raw          切换「续写模式 / 对话模式」
-    :p            看看当前的设置
+交互命令：:q 退出、:p 看设置、:t 0.7 改温度、:n 200 改长度、:raw 切换续写/对话模式。
 """
-import sys, os
+import os
+import re
+import sys
 
-# Windows 控制台默认是 GBK，遇到 → 这类字符会抛 UnicodeEncodeError
 for _s in ("stdout", "stderr"):
     try:
-        getattr(sys, _s).reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
+        getattr(sys, _s).reconfigure(encoding="utf-8", errors="replace",
+                                     line_buffering=True, write_through=True)
+    except (AttributeError, ValueError):
         pass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ---------------- 参数解析 ----------------
-cfg = dict(model="mymodel.pt", temperature=0.8, top_k=40, max_new=180,
-           chat_mode=True, device=None)
-explicit = set()          # 命令行显式给了哪些，优先级高于模型里存的
-once = None
-args = sys.argv[1:]
-i = 0
-while i < len(args):
-    a = args[i]
-    if a == "--once":
-        i += 1; once = args[i] if i < len(args) else "用户：你好"
-    elif a in ("-h", "--help"):
-        print(__doc__)
-        sys.exit(0)
-    elif a.startswith("-"):
-        print(f"[用法] 不认识的参数：{a}（参数是 key=value 形式，例如 model=model/chat_demo.pt）")
-        sys.exit(2)
-    elif "=" in a:
-        k, v = a.split("=", 1)
-        if k in cfg:
-            cur = cfg[k]
-            try:
-                cfg[k] = int(v) if isinstance(cur, int) else float(v) if isinstance(cur, float) else v
-            except ValueError:
-                cfg[k] = v
-            explicit.add(k)
-    else:
-        # 位置参数：直接当成模型路径（python chat.py model\mymodel.pt）
-        cfg["model"] = a
-    i += 1
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import common                                                   # noqa: E402
 
-# 交互输入：只有在「管道/重定向」进来时才强制 UTF-8（否则中文会变乱码）。
-# 真实控制台必须保持系统编码（Windows 中文环境是 GBK），不能改成 UTF-8 ——
-# 那样读键盘输入的中文反而会变成乱码。
-try:
-    if not sys.stdin.isatty():
-        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
+ROOT = common.find_root()
+DEFAULT_MODEL = os.path.join(ROOT, "model", "chat_demo", "chat_demo.pt")
 
-DEVICE = cfg["device"] or ("cuda" if torch.cuda.is_available() else "cpu")
 
-# ---------------- 模型定义（跟 train_llm.py 保持一致）----------------
-class MultiHeadAttention(nn.Module):
-    def __init__(self, n_embd, n_head, dropout):
-        super().__init__()
-        self.n_head, self.hs = n_head, n_embd // n_head
-        self.qkv = nn.Linear(n_embd, 3 * n_embd, bias=False)
-        self.proj = nn.Linear(n_embd, n_embd)
-        self.drop = dropout
-    def forward(self, x):
-        B, T, C = x.shape
-        q, k, v = self.qkv(x).split(C, dim=2)
-        q = q.view(B, T, self.n_head, self.hs).transpose(1, 2)
-        k = k.view(B, T, self.n_head, self.hs).transpose(1, 2)
-        v = v.view(B, T, self.n_head, self.hs).transpose(1, 2)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True,
-                dropout_p=self.drop if self.training else 0.0)
-        return self.proj(y.transpose(1, 2).contiguous().view(B, T, C))
+# ==================================================================
+# 模型定义：统一在 code\model.py，这里只导入（不要再复制一份）
+# ==================================================================
+from model import GPT                                          # noqa: E402
 
-class MLP(nn.Module):
-    def __init__(self, n_embd, dropout):
-        super().__init__()
-        self.net = nn.Sequential(nn.Linear(n_embd, 4*n_embd), nn.GELU(),
-                                 nn.Linear(4*n_embd, n_embd), nn.Dropout(dropout))
-    def forward(self, x): return self.net(x)
 
-class Block(nn.Module):
-    def __init__(self, n_embd, n_head, dropout):
-        super().__init__()
-        self.ln1, self.ln2 = nn.LayerNorm(n_embd), nn.LayerNorm(n_embd)
-        self.attn, self.mlp = MultiHeadAttention(n_embd, n_head, dropout), MLP(n_embd, dropout)
-    def forward(self, x):
-        x = x + self.attn(self.ln1(x));  return x + self.mlp(self.ln2(x))
-
-class GPT(nn.Module):
-    def __init__(self, vocab, block_size, n_layer, n_head, n_embd, dropout):
-        super().__init__()
-        self.block_size = block_size
-        self.tok_emb = nn.Embedding(vocab, n_embd)
-        self.pos_emb = nn.Embedding(block_size, n_embd)
-        self.drop = nn.Dropout(dropout)
-        self.blocks = nn.Sequential(*[Block(n_embd, n_head, dropout) for _ in range(n_layer)])
-        self.ln_f = nn.LayerNorm(n_embd)
-        self.head = nn.Linear(n_embd, vocab, bias=False)
-        self.head.weight = self.tok_emb.weight
-    def forward(self, idx):
-        B, T = idx.shape
-        x = self.drop(self.tok_emb(idx) + self.pos_emb(torch.arange(T, device=idx.device)))
-        return self.head(self.ln_f(self.blocks(x)))
-    @torch.no_grad()
-    def generate(self, idx, n, temperature=1.0, top_k=None):
-        for _ in range(n):
-            logits = self(idx[:, -self.block_size:])[:, -1, :] / max(temperature, 1e-6)
-            if top_k:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float("inf")
-            idx = torch.cat([idx, torch.multinomial(F.softmax(logits, -1), 1)], dim=1)
-        return idx
-
-# ---------------- 加载 ----------------
-path = cfg["model"]
-if not os.path.isfile(path):
-    print(f"[错误] 找不到模型文件：{path}")
-    print(f"       当前目录：{os.getcwd()}")
-    print( "       先训练一个：python code/train_llm.py data_path=src/chat_demo out_path=model/chat_demo.pt")
-    print( "       或指定别的模型：python code/chat.py model/你的模型.pt")
-    sys.exit(1)
-
-ckpt = torch.load(path, map_location=DEVICE, weights_only=False)
-C, chars = ckpt["config"], ckpt["chars"]
-stoi = {c: i for i, c in enumerate(chars)}
-itos = {i: c for c, i in stoi.items()}
-model = GPT(len(chars), C["block_size"], C["n_layer"], C["n_head"], C["n_embd"], 0.0).to(DEVICE)
-model.load_state_dict(ckpt["model"]); model.eval()
 def load_chat_props(model_path):
-    r"""读 properties\<模型名>.properties 里的对话设置。
-    这样调采样参数不用重新训练，改完 properties 直接生效。"""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r"""读 properties\<模型名>.properties 里的对话设置（改完不用重训就生效）"""
     stem = os.path.splitext(os.path.basename(model_path))[0]
-    p = os.path.join(root, "properties", stem + ".properties")
+    p = os.path.join(ROOT, "properties", stem + ".properties")
     if not os.path.isfile(p):
         return {}, None
-    out = {}
-    try:
-        with open(p, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                out[k.strip()] = v.strip()
-    except OSError:
-        return {}, None
-    return out, p
+    return common.load_properties(p), p
 
 
-# 优先级：命令行显式 > properties\<模型名>.properties > 模型文件里存的 > 默认值
-wanted = {}
-if "chat_mode" in C:
-    wanted["chat_mode"] = bool(C["chat_mode"])
-for key, ck_key in (("temperature", "chat_temperature"),
-                    ("top_k", "chat_top_k"),
-                    ("max_new", "chat_max_new")):
-    if ck_key in C:
-        wanted[key] = C[ck_key]
-
-props, props_path = load_chat_props(path)
-if "chat_mode" in props:
-    wanted["chat_mode"] = props["chat_mode"].strip().lower() in ("1", "true", "yes", "y", "on")
-for key, prop_key in (("temperature", "chat_temperature"),
-                      ("top_k", "chat_top_k"),
-                      ("max_new", "chat_max_new")):
-    if prop_key in props:
-        wanted[key] = props[prop_key]
-
-for key, val in wanted.items():
-    if key in explicit:
-        continue
-    try:
-        cfg[key] = type(cfg[key])(val)
-    except (TypeError, ValueError):
-        pass
-
-SAMPLING_KEYS = {"temperature", "top_k", "max_new", "chat_mode"}
-props_used = any(k in props for k in ("chat_mode", "chat_temperature",
-                                      "chat_top_k", "chat_max_new"))
-print(f"[模型] {path} | 参数量 {sum(p.numel() for p in model.parameters())/1e6:.2f}M "
-      f"| 词表 {len(chars)} | 设备 {DEVICE}"
-      + (" | 续写模式" if not cfg["chat_mode"] else ""))
-where = (f"properties\\{os.path.basename(props_path)}" if props_used
-         else "模型配置/默认值")
-print(f"[采样] 温度={cfg['temperature']} top_k={cfg['top_k']} 长度={cfg['max_new']}"
-      + ("（命令行覆盖）" if explicit & SAMPLING_KEYS else f"（来自 {where}）"))
-
-def unknown(s):
-    return [c for c in s if c not in stoi]
-
-def reply(text):
-    """把用户输入拼成提示词，让模型往下续写"""
-    if cfg["chat_mode"]:
-        prompt = f"用户：{text}\n助手："
+def _display(full, prompt, chat_mode):
+    """把「到目前为止生成的全部字符」裁成应该展示给用户的部分。"""
+    s = full
+    if chat_mode:
+        if "助手：" not in s:
+            return ""
+        s = s.split("助手：", 1)[1]
+        s = s.split("用户：", 1)[0]
     else:
-        prompt = text
-    bad = unknown(prompt)
-    if bad:
-        if cfg["chat_mode"]:
-            print("[说明] 这个模型的词表里没有「用户：」「助手：」这些字 —— "
-                  "说明它不是用对话语料训的。")
-            print("       已自动切到【续写模式】：把你说的话当成一段文本，让它往下写。")
-            cfg["chat_mode"] = False
+        if s.startswith(prompt):
+            s = s[len(prompt):]
+    return s
+
+
+RE_TAIL_MARK = re.compile(r"\n[ \t]*(用|用户|助手)[：:]?[ \t]*$")
+
+
+def _clean_final(s):
+    """收尾清理：切掉下一轮的「用户：」以及被截断的残留标记（常见的是单独一行的「用」）。"""
+    s = s.rstrip()
+    s = RE_TAIL_MARK.sub("", s)
+    for mark in ("\n用户：", "\n用户", "\n助手："):
+        i = s.find(mark)
+        if i >= 0:
+            s = s[:i]
+    return s.rstrip()
+
+
+class ChatSession:
+    """一次加载、反复对话；reply_stream 逐字产出，供 WebUI 流式显示。"""
+
+    def __init__(self, path=None, device=None):
+        self.path = os.path.abspath(path or DEFAULT_MODEL)
+        if not os.path.isfile(self.path):
+            raise FileNotFoundError(f"找不到模型文件：{self.path}")
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        ckpt = torch.load(self.path, map_location=self.device, weights_only=False)
+        self.config = ckpt.get("config", {})
+        self.chars = ckpt["chars"]
+        self.stoi = {c: i for i, c in enumerate(self.chars)}
+        self.itos = {i: c for c, i in self.stoi.items()}
+        self.model = GPT(len(self.chars), self.config["block_size"],
+                         self.config["n_layer"], self.config["n_head"],
+                         self.config["n_embd"], 0.0).to(self.device)
+        self.model.load_state_dict(ckpt["model"])
+        self.model.eval()
+        self.params = dict(temperature=0.8, top_k=40, max_new=180,
+                           chat_mode=bool(self.config.get("chat_mode", True)))
+        # 模型文件里存的采样参数
+        for key, ck in (("temperature", "chat_temperature"), ("top_k", "chat_top_k"),
+                        ("max_new", "chat_max_new")):
+            if ck in self.config:
+                self.params[key] = self.config[ck]
+        # properties 覆盖模型里存的
+        self.props, self.props_path = load_chat_props(self.path)
+        if "chat_mode" in self.props:
+            self.params["chat_mode"] = self.props["chat_mode"].strip().lower() in (
+                "1", "true", "yes", "y", "on")
+        for key, prop in (("temperature", "chat_temperature"), ("top_k", "chat_top_k"),
+                          ("max_new", "chat_max_new")):
+            if prop in self.props:
+                try:
+                    self.params[key] = type(self.params[key])(self.props[prop])
+                except (TypeError, ValueError):
+                    pass
+
+    # ---- 信息与参数 ----
+    def info(self):
+        return {
+            "path": self.path,
+            "name": os.path.splitext(os.path.basename(self.path))[0],
+            "device": self.device,
+            "params_m": round(sum(p.numel() for p in self.model.parameters()) / 1e6, 2),
+            "vocab": len(self.chars),
+            "block_size": self.config.get("block_size"),
+            "chat_mode": self.params["chat_mode"],
+            "temperature": self.params["temperature"],
+            "top_k": self.params["top_k"],
+            "max_new": self.params["max_new"],
+            "props": os.path.basename(self.props_path) if self.props_path else None,
+        }
+
+    def set_params(self, **kw):
+        for k, v in kw.items():
+            if k in self.params and v is not None:
+                self.params[k] = type(self.params[k])(v)
+        return dict(self.params)
+
+    # ---- 生成 ----
+    def reply_stream(self, text, temperature=None, top_k=None, max_new=None):
+        """逐段产出回复文本；调用方可以随时停止迭代来中断生成。"""
+        p = dict(self.params)
+        if temperature is not None:
+            p["temperature"] = float(temperature)
+        if top_k is not None:
+            p["top_k"] = int(top_k)
+        if max_new is not None:
+            p["max_new"] = int(max_new)
+        chat_mode = bool(p["chat_mode"])
+
+        prompt = f"用户：{text}\n助手：" if chat_mode else text
+        bad = [c for c in prompt if c not in self.stoi]
+        if bad and chat_mode:
+            # 词表里没有「用户：」「助手：」→ 这个模型不是对话语料训的，自动切续写
+            chat_mode = False
             prompt = text
-            bad = unknown(prompt)
+            bad = [c for c in prompt if c not in self.stoi]
         if bad:
-            print(f"[提示] 这些字不在词表里，已跳过：{''.join(bad)}")
-            prompt = "".join(c for c in prompt if c in stoi)
-    if not prompt:
-        return ""
-    idx = torch.tensor([[stoi[c] for c in prompt]], device=DEVICE)
-    out = model.generate(idx, cfg["max_new"], cfg["temperature"], cfg["top_k"])
-    full = "".join(itos[i] for i in out[0].tolist())
-    # 续写模式：把我们给的提示词去掉，只显示它写出来的部分
-    if not cfg["chat_mode"] and full.startswith(prompt):
-        full = full[len(prompt):]
-    # 只截取「助手：」之后的部分
-    if cfg["chat_mode"] and "助手：" in full:
-        full = full.split("助手：", 1)[1]
-    return full.split("用户：")[0].strip()      # 碰到下一个「用户：」就停
+            prompt = "".join(c for c in prompt if c in self.stoi)
+        if not prompt:
+            return
 
-# ---------------- 跑 ----------------
-if once is not None:
-    print("\n你  >", once); print("它  >", reply(once)); sys.exit(0)
+        idx = torch.tensor([[self.stoi[c] for c in prompt]], device=self.device)
+        full = prompt          # 从提示词开始累计，才能正确切掉「助手：」之前的部分
+        shown = ""
+        for tid in self.model.sample(idx, p["max_new"], p["temperature"], p["top_k"]):
+            full += self.itos[tid]
+            if chat_mode:
+                seg = full.split("助手：", 1)[-1]
+                cut = seg.find("用户")          # 不带冒号也要停，否则结尾会挂着「用户」两个字
+                if cut >= 0:
+                    full = full[: len(full) - (len(seg) - cut)]
+                    piece = _display(full, prompt, chat_mode)
+                    if piece != shown:
+                        yield piece[len(shown):]
+                    return
+            piece = _display(full, prompt, chat_mode)
+            if piece != shown:
+                yield piece[len(shown):]
+                shown = piece
 
-print("\n输入内容后回车，跟它对话。:q 退出，:p 看设置\n")
-while True:
-    try:
-        s = input("你  > ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print(); break
-    if not s: continue
-    if s in (":q", ":quit", ":exit"): break
-    if s == ":p":
-        print(f"     温度={cfg['temperature']} top_k={cfg['top_k']} 长度={cfg['max_new']} "
-              f"模式={'对话' if cfg['chat_mode'] else '续写'}"); continue
-    if s == ":raw":
-        cfg["chat_mode"] = not cfg["chat_mode"]; print(f"     模式 → {'对话' if cfg['chat_mode'] else '续写'}"); continue
-    if s.startswith(":t"):
-        cfg["temperature"] = float(s.split()[1]); print(f"     温度 → {cfg['temperature']}"); continue
-    if s.startswith(":n"):
-        cfg["max_new"] = int(s.split()[1]); print(f"     长度 → {cfg['max_new']}"); continue
-    print("它  >", reply(s), "\n")
+    def reply(self, text, **kw):
+        return _clean_final("".join(self.reply_stream(text, **kw)))
+
+
+# ==================================================================
+# 命令行（调试用）
+# ==================================================================
+def _main(argv):
+    cfg = dict(model=None, temperature=None, top_k=None, max_new=None,
+               chat_mode=None, device=None)
+    once = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--once":
+            i += 1
+            once = argv[i] if i < len(argv) else "你好"
+        elif a in ("-h", "--help"):
+            print(__doc__)
+            return 0
+        elif a == "--device":
+            i += 1
+            cfg["device"] = argv[i]
+        elif a.startswith("-"):
+            print(f"[用法] 不认识的参数：{a}（参数是 key=value 形式，例如 model=model/chat_demo.pt）")
+            return 2
+        elif "=" in a:
+            k, v = a.split("=", 1)
+            if k in cfg:
+                cur = cfg[k]
+                if cur is None:
+                    cfg[k] = v
+                else:
+                    try:
+                        cfg[k] = type(cur)(v)
+                    except ValueError:
+                        cfg[k] = v
+        else:
+            cfg["model"] = a
+        i += 1
+
+    path = cfg["model"] or DEFAULT_MODEL
+    path = common.resolve_path(ROOT, path)
+    if not os.path.isfile(path):
+        print(f"[错误] 找不到模型文件：{path}")
+        print("       先训练一个：python code\\train.py --config properties\\chat_demo.properties")
+        return 1
+
+    s = ChatSession(path, device=cfg["device"])
+    over = {k: v for k, v in cfg.items() if k in ("temperature", "top_k", "max_new", "chat_mode")}
+    s.set_params(**over)
+    info = s.info()
+    print(f"[模型] {info['path']} | 参数量 {info['params_m']}M | 词表 {info['vocab']} | 设备 {info['device']}"
+          + ("" if info["chat_mode"] else " | 续写模式"))
+    print(f"[采样] 温度={info['temperature']} top_k={info['top_k']} 长度={info['max_new']}"
+          + (f"（来自 {info['props']}）" if info["props"] else "（模型配置/默认值）"))
+
+    if once is not None:
+        print("\n你  >", once)
+        print("它  >", s.reply(once))
+        return 0
+
+    print("\n输入内容后回车，跟它对话。:q 退出，:p 看设置\n")
+    while True:
+        try:
+            line = input("你  > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not line:
+            continue
+        if line in (":q", ":quit", ":exit"):
+            break
+        if line == ":p":
+            info = s.info()
+            print(f"     温度={info['temperature']} top_k={info['top_k']} "
+                  f"长度={info['max_new']} 模式={'对话' if info['chat_mode'] else '续写'}")
+            continue
+        if line == ":raw":
+            print(f"     模式 → {'续写' if s.params['chat_mode'] else '对话'}")
+            s.set_params(chat_mode=not s.params["chat_mode"])
+            continue
+        if line.startswith(":t"):
+            s.set_params(temperature=float(line.split()[1]))
+            print(f"     温度 → {s.params['temperature']}")
+            continue
+        if line.startswith(":n"):
+            s.set_params(max_new=int(line.split()[1]))
+            print(f"     长度 → {s.params['max_new']}")
+            continue
+        print("它  >", s.reply(line), "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main(sys.argv[1:]))

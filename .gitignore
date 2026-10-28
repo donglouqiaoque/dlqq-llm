@@ -4,12 +4,13 @@
 # 忽略缓存与资源目录
 .ai_res/*
 # 忽略除chat_demo以外的模型（模型文件太大Gitee不让上传）
-model/*
+model/**/*.pt
 src/*
 properties/*
 # 忽略快捷方式（快捷方式不通用）
-script/dlqq-llm.lnk
-script/logo.ico
+script/**/*.lnk
+# 用PyCharm提交推送的话不需要忽略
+__pycache__
 #-------------------------
 
 #----------排除区----------
