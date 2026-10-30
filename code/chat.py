@@ -45,9 +45,9 @@ DEFAULT_MODEL = os.path.join(ROOT, "model", "chat_demo", "chat_demo.pt")
 from model import GPT                                          # noqa: E402
 
 
-def load_chat_props(model_path):
-    r"""读 properties\<模型名>.properties 里的对话设置（改完不用重训就生效）"""
-    stem = os.path.splitext(os.path.basename(model_path))[0]
+def load_chat_props(model_path, config=None):
+    r"""读对话设置：config 给了就按配置名读，否则按模型文件名猜同名配置。"""
+    stem = (config or "").strip() or os.path.splitext(os.path.basename(model_path or ""))[0]
     p = os.path.join(ROOT, "properties", stem + ".properties")
     if not os.path.isfile(p):
         return {}, None
@@ -85,7 +85,14 @@ def _clean_final(s):
 class ChatSession:
     """一次加载、反复对话；reply_stream 逐字产出，供 WebUI 流式显示。"""
 
-    def __init__(self, path=None, device=None):
+    def __init__(self, path=None, device=None, config=None):
+        self.config_name = (config or "").strip()
+        if self.config_name:
+            # 按配置加载：模型路径由 properties 里的 model= 决定
+            path, self.props = common.config_model(ROOT, self.config_name)
+            if not path:
+                raise FileNotFoundError(
+                    f"配置 {self.config_name} 对应的权重不存在（检查 properties 里的 model=）")
         self.path = os.path.abspath(path or DEFAULT_MODEL)
         if not os.path.isfile(self.path):
             raise FileNotFoundError(f"找不到模型文件：{self.path}")
@@ -107,8 +114,11 @@ class ChatSession:
                         ("max_new", "chat_max_new")):
             if ck in self.config:
                 self.params[key] = self.config[ck]
-        # properties 覆盖模型里存的
-        self.props, self.props_path = load_chat_props(self.path)
+        # properties 覆盖模型里存的（按配置名读；没给配置才按模型文件名猜）
+        if self.config_name:
+            self.props_path = os.path.join(ROOT, "properties", self.config_name + ".properties")
+        else:
+            self.props, self.props_path = load_chat_props(self.path)
         if "chat_mode" in self.props:
             self.params["chat_mode"] = self.props["chat_mode"].strip().lower() in (
                 "1", "true", "yes", "y", "on")
@@ -134,6 +144,7 @@ class ChatSession:
             "top_k": self.params["top_k"],
             "max_new": self.params["max_new"],
             "props": os.path.basename(self.props_path) if self.props_path else None,
+            "config": self.config_name or None,
         }
 
     def set_params(self, **kw):

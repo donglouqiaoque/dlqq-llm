@@ -128,6 +128,40 @@ def resolve_path(root, p):
     return p if os.path.isabs(p) else os.path.normpath(os.path.join(root, p))
 
 
+def config_model(root, name):
+    """配置名 → (模型绝对路径 | None, props)。
+
+    `model=` 里只写名字（不带 .pt），按 model\\<名字>\\<名字>.pt 解析；
+    权重不存在时返回 (None, props)，由调用方决定是跳过还是报错。
+    """
+    props = load_properties(os.path.join(root, "properties", name + ".properties"))
+    m = (props.get("model") or "").strip()
+    if not m:
+        return None, props
+    if os.path.splitext(m)[1].lower() != ".pt":
+        m += ".pt"
+    path = os.path.join(root, "model", os.path.splitext(m)[0], m)
+    return (path if os.path.isfile(path) else None), props
+
+
+def chat_configs(root):
+    """所有能对应到现成权重的配置：[{name, model, path}]，按名字排序。"""
+    out = []
+    d = os.path.join(root, "properties")
+    try:
+        names = sorted(f[:-len(".properties")] for f in os.listdir(d)
+                       if f.endswith(".properties"))
+    except OSError:
+        return out
+    for name in names:
+        path, props = config_model(root, name)
+        if path:
+            out.append({"name": name,
+                        "model": (props.get("model") or name).strip(),
+                        "path": path})
+    return out
+
+
 def hide_dir(path):
     """把目录设为隐藏（Windows 资源管理器默认不显示）；失败不影响功能。"""
     if os.name != "nt" or not os.path.isdir(path):

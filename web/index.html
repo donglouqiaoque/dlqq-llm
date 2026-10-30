@@ -155,6 +155,8 @@
 
   <section id="server">
     <div class="row">
+      <label>配置</label>
+      <select id="srvConfig" title="只服务选中的配置；默认全部"></select>
       <label>端口</label><input type="number" id="srvPort" value="49128" style="width:110px">
       <button class="primary" id="btnSrvStart">启动服务</button>
       <button class="danger" id="btnSrvStop" disabled>停止</button>
@@ -233,6 +235,8 @@ async function loadConfigs() {
   $('#cfgSelect').innerHTML = CONFIGS.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
   $('#chatConfig').innerHTML = CONFIGS.map(c =>
     `<option value="${c.name}">${c.name}</option>`).join('');
+  $('#srvConfig').innerHTML = '<option value="">全部配置</option>' + CONFIGS.map(c =>
+    `<option value="${c.name}">${c.name}</option>`).join('');
   renderCfgForm();
 }
 $('#trainCfg').addEventListener('change', e => applyConfigSelection(e.target.value));
@@ -302,16 +306,10 @@ $('#btnCfgSave').onclick = async () => {
   if (r.ok) loadConfigs();
 };
 
-let MODELS = [];                    // /api/models 的缓存，用来把配置名解析成模型路径
+let MODELS = [];                    // /api/models 的缓存（签名页用）
 async function loadModels() {
   const r = await api('models');
   MODELS = r.models || [];
-}
-// 配置文件名 = 模型名：dlqq_llm.properties → model/dlqq_llm/dlqq_llm.pt
-function modelPathForConfig(cfgName) {
-  const stem = (cfgName || '').replace(/\.properties$/, '');
-  const m = MODELS.find(x => x.id === stem);
-  return m ? m.path : '';
 }
 
 let es = null;
@@ -415,8 +413,7 @@ async function send() {
   const text = $('#chatInput').value.trim();
   if (!text || chatAbort) return;
   const cfgName = $('#chatConfig').value;
-  const model = modelPathForConfig(cfgName);
-  if (!model) { toast('没有对应这个配置的模型：' + cfgName); return; }
+  if (!cfgName) { toast('先选一个配置'); return; }
   $('#chatInput').value = '';
   $('#chatInput').style.height = 'auto';
   HISTORY.push({ role: 'user', content: text });
@@ -432,7 +429,7 @@ async function send() {
     const resp = await fetch(`/api/chat?t=${TOKEN}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       // 默认只发当前这一句：小模型（256 上下文）带历史会顺着上一轮答案复读
-      body: JSON.stringify({ model, text }),
+      body: JSON.stringify({ config: cfgName, text }),
       signal: chatAbort.signal });
     if (!resp.ok) { body.textContent = '请求失败：' + (await resp.text()); return; }
     const reader = resp.body.getReader();
@@ -510,8 +507,10 @@ document.querySelectorAll('.subtabs button[data-srv]').forEach(b => b.onclick = 
 $('#btnClearSrv').onclick = () => { $('#srvChat').innerHTML = ''; $('#srvLog').textContent = ''; };
 
 $('#btnSrvStart').onclick = async () => {
+  const cfg = $('#srvConfig').value;
   const r = await api('server/start', {method:'POST', headers:{'Content-Type':'application/json'},
-                                       body: JSON.stringify({port: +$('#srvPort').value})});
+                                       body: JSON.stringify({port: +$('#srvPort').value,
+                                                             configs: cfg ? [cfg] : []})});
   if (!r.ok) return toast('启动失败：' + r.error);
   $('#btnSrvStart').disabled = true; $('#btnSrvStop').disabled = false;
   $('#srvState').textContent = '运行中'; $('#srvUrl').textContent = `http://127.0.0.1:${r.port}/v1`;

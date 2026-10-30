@@ -310,6 +310,11 @@ def list_models():
     return sorted(out, key=lambda m: m["path"])
 
 
+def list_chat_configs():
+    """对话下拉用：只给配置名和模型名，不带 data_path 之类的细节。"""
+    return [{"name": c["name"], "model": c["model"]} for c in common.chat_configs(ROOT)]
+
+
 def list_corpora():
     out = []
     base = os.path.join(ROOT, "src")
@@ -419,6 +424,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "configs": list_configs()})
         elif path == "/api/models":
             self._json({"ok": True, "models": list_models()})
+        elif path == "/api/chat/configs":
+            self._json({"ok": True, "configs": list_chat_configs()})
         elif path == "/api/corpora":
             self._json({"ok": True, "corpora": list_corpora()})
         elif path == "/api/train/status":
@@ -520,6 +527,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True})
 
     def _chat(self, body, qs):
+        cfg = (body.get("config") or "").strip()
         model = body.get("model") or ""
         # 前端传 messages（多轮）；也兼容旧的单条 text
         msgs = body.get("messages")
@@ -536,9 +544,19 @@ class Handler(BaseHTTPRequestHandler):
             text = (body.get("text") or "").strip()
         if not text:
             return self._err(400, "消息为空")
-        path = os.path.join(ROOT, model.replace("/", os.sep)) if model else ""
-        if not path or not os.path.isfile(path):
-            return self._err(404, f"模型不存在：{model}")
+
+        # 按配置加载：模型路径和对话参数都来自 properties\<配置>.properties
+        if cfg:
+            if "/" in cfg or "\\" in cfg or cfg.startswith("."):
+                return self._err(400, "配置名不合法")
+            path, _props = common.config_model(ROOT, cfg)
+            if not path:
+                return self._err(404, f"配置 {cfg} 对应的权重不存在（检查 model=）")
+        else:
+            # 兼容老页面：只给 .pt 路径，对话参数按文件名猜同名配置
+            path = os.path.join(ROOT, model.replace("/", os.sep)) if model else ""
+            if not path or not os.path.isfile(path):
+                return self._err(404, f"模型不存在：{model}")
         # 训练中且同名模型 → 拒绝（与方案一致）
         running = STATE.get("train") and STATE["train"].alive()
         training_model = ""
@@ -551,9 +569,9 @@ class Handler(BaseHTTPRequestHandler):
 
         import chat as chat_mod
         try:
-            s = get_chat_session(path)
+            s = get_chat_session(path, cfg)
             self._sse_start()
-            self._sse("meta", {"model": mid, "info": s.info()})
+            self._sse("meta", {"model": mid, "config": cfg or None, "info": s.info()})
             pieces = []
             for piece in s.reply_stream(text):
                 pieces.append(piece)
@@ -576,6 +594,9 @@ class Handler(BaseHTTPRequestHandler):
                                   "请先结束它，或换一个端口")
         args = [sys.executable, os.path.join(ROOT, "code", "http_server.py"),
                 "--port", str(port), "--events", "--parent-pid", str(os.getpid())]
+        for name in (body.get("configs") or []):
+            if isinstance(name, str) and name.strip():
+                args += ["--config", name.strip()]
 
         def on_line(line):
             if line.startswith("@@EV@@ "):
@@ -629,7 +650,7 @@ class LANHandler(Handler):
     """
 
     server_version = "dlqq-webui-lan/1.0"
-    GET_WHITELIST = ("/", "/chat.html", "/logo.ico", "/api/models")
+    GET_WHITELIST = ("/", "/chat.html", "/logo.ico", "/api/models", "/api/chat/configs")
     POST_WHITELIST = ("/api/chat",)
 
     def _auth(self, qs):
@@ -646,6 +667,8 @@ class LANHandler(Handler):
         elif path == "/logo.ico":
             self._send_file(os.path.join(ROOT, "script", "logo.ico"),
                             "image/x-icon")
+        elif path == "/api/chat/configs":
+            self._json({"ok": True, "configs": list_chat_configs()})
         else:
             self._json({"ok": True, "models": list_models()})
 
@@ -654,9 +677,9 @@ class LANHandler(Handler):
             self._err(403, "局域网只开放对话页")
             return
         body = self._body()
-        allowed = {m["path"] for m in list_models()}
-        if (body.get("model") or "").replace("\\", "/") not in allowed:
-            self._err(400, "模型不在清单里")
+        allowed = {c["name"] for c in list_chat_configs()}
+        if (body.get("config") or "").strip() not in allowed:
+            self._err(400, "配置不在清单里")
             return
         try:
             self._chat(body, {})
@@ -688,11 +711,12 @@ CHAT_LOCK = threading.Lock()
 CHAT_SESSION = {"path": "", "obj": None}
 
 
-def get_chat_session(path):
-    """模型常驻内存；换模型时释放旧的（含显存）。"""
+def get_chat_session(path, config_name=""):
+    """模型常驻内存；换配置/模型时释放旧的（含显存）。"""
     import chat as chat_mod
+    key = config_name or path
     with CHAT_LOCK:
-        if CHAT_SESSION["path"] == path and CHAT_SESSION["obj"] is not None:
+        if CHAT_SESSION["path"] == key and CHAT_SESSION["obj"] is not None:
             return CHAT_SESSION["obj"]
         CHAT_SESSION["obj"] = None
         CHAT_SESSION["path"] = ""
@@ -704,9 +728,9 @@ def get_chat_session(path):
                 torch.cuda.empty_cache()
         except Exception:
             pass
-        s = chat_mod.ChatSession(path)
+        s = chat_mod.ChatSession(path, config=config_name or None)
         CHAT_SESSION["obj"] = s
-        CHAT_SESSION["path"] = path
+        CHAT_SESSION["path"] = key
         return s
 
 

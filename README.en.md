@@ -39,7 +39,7 @@ Double-click `script\start.bat`; the browser opens the local console at an addre
 | Tab | What it does |
 |---|---|
 | Train | pick a config and corpus, press Start; logs stream live and land in `.ai_res\cache\train-logs\` |
-| Chat | pick a model and type; the reply streams character by character and can be stopped |
+| Chat | pick a config and type; the reply streams character by character and can be stopped |
 | Server | run a local OpenAI-compatible bridge; every request shows up on the page in real time |
 | Config | edit `properties\*.properties` in a form; comments and key order are preserved |
 | Signature | compute or verify SHA-256 for every `.pt` under `model\` |
@@ -314,12 +314,11 @@ Common keys:
 | `chat_top_k` | 40 | Sample from the top K; 0 = no truncation |
 | `chat_max_new` | 180 | Max characters generated per turn |
 
-`chat_*` keys are **dialogue parameters** stored in the checkpoint. `chat.py` and
-`http_server.py` resolve them by this priority (editing properties takes effect without
-retraining):
+`chat_*` keys are **dialogue parameters** stored in the checkpoint. Both the web chat and the
+bridge resolve them by this priority (editing properties takes effect without retraining):
 
 ```
-explicit CLI argument  >  properties\<model>.properties  >  value in the checkpoint  >  default
+explicit CLI argument  >  properties\<config>.properties  >  value in the checkpoint  >  default
 ```
 
 ---
@@ -737,12 +736,14 @@ with `Compute on the Signature tab` (mandatory once the weights change).
 ---
 
 ## Serving the model to DSH
-On the **Server** tab: set the port (default 49128) and press Start; the page shows
-`http://127.0.0.1:49128/v1`, which you put into the DSH provider settings. Every request then
-appears in the session list below (fed by the `@@EV@@` lines the service prints to stdout), so you
-debug from the page instead of the console. Press Stop to shut it down — closing the `start.bat`
-window also stops it.
+On the **Server** tab: pick a config (default: all), set the port (default 49128) and press Start;
+the page shows `http://127.0.0.1:49128/v1`, which you put into the DSH provider settings. Every
+request then appears in the session list below (fed by the `@@EV@@` lines the service prints to
+stdout), so you debug from the page instead of the console. Press Stop to shut it down — closing
+the `start.bat` window also stops it.
 
 The service is OpenAI-compatible: `/v1/models` and `/v1/chat/completions` (with `stream`).
-Models are scanned from `model\**\*.pt` and loaded only on first use.
+Models come from the `properties\` configs whose `model=` points at an existing weight (no more
+directory scanning), and chat parameters are read from the same config. Models load only on first
+use.
 

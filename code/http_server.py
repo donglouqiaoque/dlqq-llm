@@ -2,7 +2,7 @@
 r"""把训练好的模型起成一个 OpenAI 兼容的 HTTP 服务（桥接服务）
 ================================================================
 本文件独立自足：只依赖 torch 和 Python 标准库（http.server / json / threading），
-不引用工程里任何其它模块，也不依赖 .ai_res（那是临时目录）。
+外加同目录的 common.py（读 properties 配置），不依赖 .ai_res（那是临时目录）。
 
 供 DSH（或任何 OpenAI 兼容客户端）接入：DSH 侧只需要在界面里
 「设置 → 模型 → 添加提供方 → 自定义提供方」，填上本服务的地址即可，不用改任何配置文件。
@@ -22,11 +22,11 @@ r"""把训练好的模型起成一个 OpenAI 兼容的 HTTP 服务（桥接服�
     · 除此之外**不做任何过滤、打分或关键词匹配** —— 答成什么样是模型的事；
     · 只做基本对话，不支持图片。
 
-用法（在工程根目录执行）：
-    python script\chat\http\http_server.py
-    python script\chat\http\http_server.py --model model\chat_demo\chat_demo.pt --port 49128
-    python script\chat\http\http_server.py --served-name my-model --device cpu
-或者直接双击 script\chat\http\http_server.bat。
+用法（在工程根目录执行；一般由 WebUI 内部调用）：
+    python code\http_server.py                     # 服务 properties\ 下所有能对上权重的配置
+    python code\http_server.py --config dlqq_llm   # 只服务一个配置
+    python code\http_server.py --port 49128 --device cpu
+模型清单和对话参数都来自 properties\<配置>.properties，不再扫 model\ 目录。
 """
 import os
 import re
@@ -213,9 +213,12 @@ def load_model(path, device=None):
 # ==================================================================
 # 生成：把 messages 拼成提示词，逐字符采样
 # ==================================================================
-def read_model_props(path):
-    r"""读 properties\<模型名>.properties 里的对话设置（改完不用重训就生效）"""
-    stem = os.path.splitext(os.path.basename(path))[0]
+def read_model_props(path, config_name=""):
+    r"""读 properties\<配置名>.properties 里的对话设置（改完不用重训就生效）。
+
+    没给配置名时退回按模型文件名猜同名配置（兼容老调用）。
+    """
+    stem = (config_name or "").strip() or os.path.splitext(os.path.basename(path))[0]
     p = os.path.join(ROOT, "properties", stem + ".properties")
     out = {}
     if not os.path.isfile(p):
@@ -234,7 +237,7 @@ def read_model_props(path):
 
 
 class Engine:
-    def __init__(self, path, device=None):
+    def __init__(self, path, device=None, config_name=""):
         self.model, chars, self.cfg, self.device = load_model(path, device)
         self.chars = chars
         self.stoi = {c: i for i, c in enumerate(chars)}
@@ -243,10 +246,11 @@ class Engine:
         self.lock = threading.Lock()      # 同一时刻只跑一个生成，避免并发互相踩
         self.loaded = time.strftime("%Y-%m-%d %H:%M:%S")
         self.warned_tools = False         # 只在第一次遇到 tools 时提示一次
+        self.config_name = config_name
 
-        # 对话设置优先级：properties\<模型名>.properties > 模型文件里存的 > 服务启动参数
+        # 对话设置优先级：properties\<配置>.properties > 模型文件里存的 > 服务启动参数
         cfg = self.cfg
-        props = read_model_props(path)
+        props = read_model_props(path, config_name)
         self.chat_mode = bool(cfg.get("chat_mode", True))
         if "chat_mode" in props:
             self.chat_mode = props["chat_mode"].strip().lower() in ("1", "true", "yes", "y", "on")
@@ -380,37 +384,8 @@ def _clean_reply(text):
 
 
 # ==================================================================
-# 模型清单 + 懒加载池
+# 配置清单 + 懒加载池
 # ==================================================================
-def scan_models(dirs):
-    r"""扫目录里的 .pt 权重，模型 id 用目录名（不含扩展名）。
-    模型放在 model\<名字>\<名字>.pt；模型 id 优先用目录名，
-    目录名和文件名不一致时才写成 目录/文件名，重名再加 @父目录 区分。"""
-    found = {}
-    for d in dirs:
-        if not d or not os.path.isdir(d):
-            continue
-        for root, subdirs, names in os.walk(d):
-            subdirs[:] = sorted(s for s in subdirs if not s.startswith("."))
-            for fn in sorted(names):
-                if not fn.lower().endswith(".pt"):
-                    continue
-                path = os.path.join(root, fn)
-                if not os.path.isfile(path):
-                    continue
-                base = os.path.splitext(fn)[0]
-                parent = os.path.basename(root.rstrip(os.sep))
-                mid = base if base == parent else f"{parent}/{base}"
-                if mid in found:
-                    mid = f"{mid}@{parent}"
-                k = 2
-                while mid in found:
-                    mid = f"{mid}@{parent}-{k}"
-                    k += 1
-                found[mid] = path
-    return found
-
-
 class ModelPool:
     """按需加载：/v1/models 只列文件名，不动显存；
     真正有对话请求进来才 torch.load，并做 LRU 淘汰（默认只留一个在显存里）。"""
@@ -478,7 +453,7 @@ class ModelPool:
 
             print(f"[加载] {mid} ← {path}", flush=True)
             t0 = time.time()
-            eng = Engine(path, self.device)
+            eng = Engine(path, self.device, mid)
             print(f"[加载] {mid} 完成：词表 {len(eng.chars)} | 上下文 {eng.block} 字 | "
                   f"{time.time() - t0:.1f}s", flush=True)
             self.loaded[mid] = eng
@@ -749,15 +724,11 @@ import common                                                     # noqa: E402
 
 def main():
     global ARGS, POOL, EMIT_EVENTS
-    ap = argparse.ArgumentParser(description="把训练好的模型起成 OpenAI 兼容服务（支持多模型）")
-    ap.add_argument("--model", action="append", default=[],
-                    help="额外指定 .pt 文件（可写多次）；默认自动扫 model\\ 和 release\\")
-    ap.add_argument("--model-dir", action="append", default=[],
-                    help="额外的模型目录（可写多次）")
+    ap = argparse.ArgumentParser(description="按配置文件把模型起成 OpenAI 兼容服务")
+    ap.add_argument("--config", action="append", default=[],
+                    help="只服务这些配置（properties 里的名字，可写多次）；默认全部")
     ap.add_argument("--default-model", default=None,
-                    help="请求没带 model 时用哪个；默认清单里第一个")
-    ap.add_argument("--served-name", default=None,
-                    help="给 --model 指定的那个文件起个别名（兼容旧用法）")
+                    help="请求没带 model 时用哪个配置；默认清单里第一个")
     ap.add_argument("--max-loaded", type=int, default=1,
                     help="同时留在显存里的模型数，默认 1（切模型就卸载上一个）")
     ap.add_argument("--host", default="127.0.0.1", help="监听地址，默认只绑本机")
@@ -781,36 +752,24 @@ def main():
                     help="父进程 pid；父进程退出时本进程自动退出（供 WebUI 调用）")
     a = ap.parse_args()
 
-    # ---- 收集模型清单 ----
-    dirs = [os.path.join(ROOT, "model"), os.path.join(ROOT, "release")]
-    dirs += [os.path.abspath(d) for d in (a.model_dir or [])]
-    reg = scan_models(dirs)
-    for p in (a.model or []):
-        p = os.path.abspath(p)
-        if not os.path.isfile(p):
-            print(f"[错误] --model 指的文件不存在：{p}")
-            sys.exit(1)
-        base = os.path.splitext(os.path.basename(p))[0]
-        mid = a.served_name if (a.served_name and len(a.model) == 1) else base
-        k = 2
-        while mid in reg and reg[mid] != p:
-            mid = f"{base}-{k}"
-            k += 1
-        reg[mid] = p
-
+    # ---- 收集配置：每个配置一条，模型路径和对话参数都由 properties 决定 ----
+    cfgs = common.chat_configs(ROOT)
+    if a.config:
+        want = {c.strip().lower() for c in a.config if c.strip()}
+        cfgs = [c for c in cfgs if c["name"].lower() in want]
+    reg = {c["name"]: c["path"] for c in cfgs}
     if not reg:
-        print("[错误] 一个 .pt 都没找到。")
-        print(f"       扫过的目录：{', '.join(dirs)}")
-        print("       先训练一个：script\\train.bat，或把权重放进 model\\")
+        print("[错误] 没有任何配置能对应到现成的权重。")
+        print("       检查 properties\\<名字>.properties 里的 model=，")
+        print("       它应指向 model\\<名字>\\<名字>.pt；也可以先训练一个。")
         sys.exit(1)
 
     ids = sorted(reg)
     default = a.default_model or ids[0]
     if default not in reg:
-        base = os.path.splitext(os.path.basename(default))[0]
-        hit = [k for k in ids if k == base or k.split("@")[0] == base]
+        hit = [k for k in ids if k.lower() == default.lower()]
         if not hit:
-            print(f"[错误] --default-model 不在清单里：{default}（可用：{', '.join(ids)}）")
+            print(f"[错误] --default-model 不是可用配置：{default}（可用：{', '.join(ids)}）")
             sys.exit(1)
         default = hit[0]
     a.default_model = default
@@ -858,7 +817,7 @@ def main():
     print("=" * 68)
     print("  桥接服务：本地模型（OpenAI 兼容，多模型 + 懒加载）")
     print("=" * 68)
-    print(f"[清单] 共 {len(ids)} 个模型（现在不加载，谁被调用才加载谁）")
+    print(f"[清单] 共 {len(ids)} 个配置（模型路径与对话参数都取自 properties，懒加载）")
     for mid in ids:
         p = reg[mid]
         try:

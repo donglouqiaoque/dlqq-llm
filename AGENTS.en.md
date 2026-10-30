@@ -95,6 +95,7 @@ script\start.bat
 | GET | `/api/env` | interpreter + dependency probe (version / torch / CUDA) |
 | GET | `/api/configs` | config list with parsed key/values |
 | GET | `/api/models` | `model\**\*.pt` list (with signed flag) |
+| GET | `/api/chat/configs` | configs that map to an existing weight (name + model) |
 | GET | `/api/corpora` | corpus directories under `src\` (file count, size) |
 | GET | `/api/train/status` `train/log` | training state and incremental log |
 | GET | `/api/server/status` | bridge state and port |
@@ -109,9 +110,10 @@ script\start.bat
   turns it into an SSE `server-chat` event, which the "server" tab renders as a Q&A list.
 - SSE frames are `data: <json>\n\n`; one thread per connection, so new long-lived endpoints
   must consider the thread budget.
-- **LAN port** (`LANHandler`) only allows `GET /`, `/chat.html`, `/logo.ico`, `/api/models` and
-  `POST /api/chat`; everything else returns 403. `POST /api/chat` only accepts models listed under
-  `model\` (blocks path traversal). Changing LAN endpoints means updating `web/chat.html` too.
+- **LAN port** (`LANHandler`) only allows `GET /`, `/chat.html`, `/logo.ico`, `/api/models`,
+  `/api/chat/configs` and `POST /api/chat`; everything else returns 403. `POST /api/chat` only
+  accepts a `config` that appears in the config list. Changing LAN endpoints means updating
+  `web/chat.html` too.
 
 ## 5. Config (properties) conventions
 
@@ -156,8 +158,9 @@ is reduced automatically with a warning.
 
 **Checkpoint policy**: save when validation loss improves; additionally every `save_every` steps.
 
-**Chat parameter precedence**: explicit args > `properties\<model>.properties` > values stored in
-the `.pt` > defaults (implemented twice: `chat.py` and `http_server.py` — keep them in sync).
+**Chat parameter precedence**: explicit args > `properties\<config>.properties` > values stored in
+the `.pt` > defaults (used by both the web chat and the bridge; implemented twice in `chat.py` and
+`http_server.py` — keep them in sync).
 
 **Stopping**: prompts use `用户：` / `助手：`; generation stops at the next `用户：`. If the vocabulary
 lacks those markers, the session falls back to plain continuation mode.

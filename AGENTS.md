@@ -86,6 +86,7 @@ script\start.bat
 | GET | `/api/env` | 解释器与依赖探测（版本 / torch / CUDA） |
 | GET | `/api/configs` | 配置列表 + 解析后的键值 |
 | GET | `/api/models` | `model\**\*.pt` 清单（含是否已签名） |
+| GET | `/api/chat/configs` | 对话下拉用：能对上权重的配置名 + 模型名 |
 | GET | `/api/corpora` | `src\` 下的语料目录（文件数、体积） |
 | GET | `/api/train/status` `train/log` | 训练状态与增量日志 |
 | GET | `/api/server/status` | 桥接服务状态与端口 |
@@ -99,9 +100,9 @@ script\start.bat
 - 桥接服务每次完成对话会往 stdout 打一行 `@@EV@@ {json}`（`--events`），
   webui 读线程按前缀识别后转成 SSE `server-chat`，页面「服务」页据此显示问答。
 - SSE 用 `data: <json>\n\n`，一条连接一个线程；新增长连接接口要考虑线程上限。
-- **局域网端口**（`LANHandler`）只放行 `GET /`、`/chat.html`、`/logo.ico`、`/api/models`
-  与 `POST /api/chat`，其余路径一律 403；`POST /api/chat` 的模型必须在 `model\` 清单里
-  （挡路径穿越）。改局域网接口时同步 `web/chat.html`。
+- **局域网端口**（`LANHandler`）只放行 `GET /`、`/chat.html`、`/logo.ico`、`/api/models`、
+  `/api/chat/configs` 与 `POST /api/chat`，其余路径一律 403；`POST /api/chat` 的 `config`
+  必须是配置清单里的名字。改局域网接口时同步 `web/chat.html`。
 
 ## 五、配置文件（properties）约定
 
@@ -141,8 +142,8 @@ script\start.bat
 
 **保存策略**：验证损失变好时存盘；`save_every > 0` 时额外定时存。
 
-**对话参数优先级**：`显式参数` > `properties\<模型名>.properties` > `模型文件里存的` > `默认值`
-（`chat.py` 与 `http_server.py` 各实现一份，改一处要同步另一处）。
+**对话参数优先级**：`显式参数` > `properties\<配置名>.properties` > `模型文件里存的` > `默认值`
+（网页对话与桥接服务都按这个顺序取，`chat.py` 与 `http_server.py` 各实现一份，改一处要同步另一处）。
 
 **生成停止**：提示词用 `用户：` / `助手：`；生成到下一个 `用户：` 直接截断；词表缺这两个标记时
 自动切「续写模式」。

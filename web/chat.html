@@ -59,7 +59,7 @@
   <div class="composer">
     <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
     <div class="bar">
-      <select id="model" title="选择模型"></select>
+      <select id="model" title="选择配置"></select>
       <span class="muted" id="state"></span>
       <div class="spacer"></div>
       <button id="btnNew">新对话</button>
@@ -80,7 +80,7 @@ function hint() {
   const h = document.createElement('div');
   h.className = 'hint';
   h.id = 'hint';
-  h.textContent = '选一个模型，随便聊两句。';
+  h.textContent = '选一个配置，随便聊两句。';
   $('#box').appendChild(h);
 }
 
@@ -101,33 +101,33 @@ function addMsg(who, text) {
   return b;
 }
 
-async function loadModels() {
+async function loadConfigs() {
   try {
-    const r = await fetch('/api/models');
+    const r = await fetch('/api/chat/configs');
     const d = await r.json();
     const sel = $('#model');
     sel.innerHTML = '';
-    const list = d.models || [];
-    for (const m of list) {
+    const list = d.configs || [];
+    for (const c of list) {
       const o = document.createElement('option');
-      o.value = m.path;
-      o.textContent = m.id;
+      o.value = c.name;
+      o.textContent = c.name === c.model ? c.name : `${c.name}（${c.model}）`;
       sel.appendChild(o);
     }
     if (!list.length) {
-      sel.innerHTML = '<option value="">（没有可用模型）</option>';
-      setState('模型目录是空的');
+      sel.innerHTML = '<option value="">（没有可用配置）</option>';
+      setState('没有能对应到权重的配置');
     }
   } catch (e) {
-    setState('模型列表加载失败：' + e.message);
+    setState('配置列表加载失败：' + e.message);
   }
 }
 
 async function send() {
   const text = $('#input').value.trim();
-  const model = $('#model').value;
+  const config = $('#model').value;
   if (!text || abort) return;
-  if (!model) { setState('先选一个模型'); return; }
+  if (!config) { setState('先选一个配置'); return; }
   $('#input').value = '';
   $('#input').style.height = 'auto';
   addMsg('user', text);
@@ -142,7 +142,7 @@ async function send() {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, text }),
+      body: JSON.stringify({ config, text }),
       signal: abort.signal,
     });
     if (!resp.ok) {
@@ -208,7 +208,7 @@ $('#input').addEventListener('input', e => {
 });
 
 hint();
-loadModels();
+loadConfigs();
 </script>
 </body>
 </html>
