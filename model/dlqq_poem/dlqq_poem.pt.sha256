@@ -1,0 +1,7 @@
+# dlqq-llm 模型权重数字签名
+# 由 script/model_signature.py 生成，请勿手工修改（改一个字符校验就会失败）。
+# algorithm=sha256；校验：script\verify_signature.bat
+algorithm=sha256
+file=dlqq_poem.pt
+size=139820363
+sha256=8a1b79421a7349813b181e3e2abb8590ed1150ccbddc2c284c7a02d9cdac9781

@@ -47,8 +47,16 @@
   .msg .who { font-size:11px; color:var(--muted); }
   .msg.user .body { color:#bcd2ff; }
   .msg.bot .body { color:#dfe6f5; white-space:pre-wrap; }
-  .grid { flex:1; min-height:0; overflow:auto; display:grid;
-          grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:10px; align-content:start; }
+  /* 配置页：一行一个配置项，左边键名 + 中文解释，右边控件 */
+  .cfglist { flex:1; min-height:0; overflow:auto; border:1px solid var(--line); border-radius:10px; }
+  .cfgrow { display:flex; align-items:center; gap:18px; padding:9px 14px;
+            border-bottom:1px solid var(--line); }
+  .cfgrow:last-child { border-bottom:0; }
+  .cfgmeta { width:340px; flex:0 0 340px; }
+  .cfgmeta .k { font-family:Consolas, monospace; font-size:13px; color:#cfd6e4; }
+  .cfgmeta .d { font-size:12px; color:var(--muted); line-height:1.4; }
+  .cfgrow .ctl { flex:1; display:flex; min-width:0; }
+  .cfgrow .ctl input, .cfgrow .ctl select { width:100%; max-width:460px; }
   .field { display:flex; flex-direction:column; gap:4px; }
   .field input, .field select { width:100%; }
   .muted { color:var(--muted); font-size:12px; }
@@ -121,6 +129,7 @@
       <label>配置</label>
       <select id="trainCfg" style="min-width:240px"></select>
       <button class="primary" id="btnTrainStart">开始训练</button>
+      <button id="btnTrainResume">继续训练</button>
       <button class="danger" id="btnTrainStop" disabled>停止</button>
       <span class="muted" id="trainState">未运行</span>
     </div>
@@ -169,7 +178,7 @@
       <button class="primary" id="btnCfgSave">保存</button>
       <span class="muted" id="cfgState"></span>
     </div>
-    <div class="grid" id="cfgForm"></div>
+    <div class="cfglist" id="cfgForm"></div>
   </section>
 
   <section id="tool">
@@ -227,18 +236,58 @@ async function loadConfigs() {
   renderCfgForm();
 }
 $('#trainCfg').addEventListener('change', e => applyConfigSelection(e.target.value));
+// 每个配置键的中文解释（新增键时记得一起补）
+const KEY_INFO = {
+  data_path:       '语料目录，相对工程根；目录里的 .jsonl / .txt 全部参与训练',
+  model:           '模型名，权重存到 model/<名字>/<名字>.pt',
+  cache_dir:       '切词缓存目录，改语料或词表参数后会重新切',
+  chat_mode:       'true = 对话格式（用户：/助手：），false = 纯续写',
+  chat_temperature: '采样温度，越大越随机，越小越保守',
+  chat_top_k:      '每个字只从概率最高的 K 个里采样，0 = 不截断',
+  chat_max_new:    '一次最多生成多少字',
+  n_layer:         'Transformer 层数，越深越慢也越强',
+  n_head:          '注意力头数，必须能整除 n_embd',
+  n_embd:          '隐藏维度，决定模型宽度',
+  block_size:      '上下文长度，一次最多能看多少个字',
+  batch_size:      '每步并行多少段，显存不够就调小',
+  max_iters:       '训练总步数；每步 token = batch_size × block_size',
+  eval_interval:   '每多少步评估一次并打日志',
+  eval_iters:      '每次评估抽多少批，越大越准也越慢',
+  lr:              '学习率，太大发散、太小收敛慢',
+  weight_decay:    '权重衰减，正则化用',
+  grad_clip:       '梯度裁剪阈值，防止梯度爆炸',
+  dropout:         '随机丢弃比例，数据少时调大防止过拟合',
+  seed:            '随机种子，固定后结果可复现',
+  grad_accum:      '梯度累积步数，等效放大 batch 而不多吃显存',
+  warmup_iters:    '学习率线性预热的步数',
+  lr_decay:        '学习率衰减方式：cosine 余弦退火 / none 恒定',
+  min_lr_frac:     '退火终点 = 初始学习率 × 这个比例',
+  grad_checkpoint: '梯度检查点，省显存但慢 20~30%',
+  save_every:      '每多少步强制存档（0 = 只在验证变好时存）',
+  save_dtype:      '存档精度：fp32 最稳、fp16/bf16 体积减半',
+  save_optimizer:  '是否保存优化器状态；继续训练需要它',
+  max_vocab:       '词表上限，只保留最常用的 N 个字',
+  val_frac:        '从语料尾部切多少比例做验证集',
+  python:          '指定解释器完整路径；留空 = 用 PATH 里的 python',
+  confirm:         '开始前是否再确认一次：no / yes',
+};
+
 function renderCfgForm() {
   const c = CONFIGS.find(x => x.name === $('#cfgSelect').value);
   if (!c) return;
   const keys = Object.keys(c.props || {});      // 配置里出现过的键全部展示
   $('#cfgForm').innerHTML = keys.map(k => {
     const v = c.props[k];
-    if (v === 'true' || v === 'false')
-      return `<div class="field"><label>${k}</label><select data-k="${k}">
-        <option ${v==='true'?'selected':''}>true</option>
-        <option ${v==='false'?'selected':''}>false</option></select></div>`;
-    return `<div class="field"><label>${k}</label>
-      <input type="text" data-k="${k}" value="${esc(v)}"></div>`;
+    const desc = KEY_INFO[k] || '';
+    const ctl = (v === 'true' || v === 'false')
+      ? `<select data-k="${k}">
+           <option ${v==='true'?'selected':''}>true</option>
+           <option ${v==='false'?'selected':''}>false</option></select>`
+      : `<input type="text" data-k="${k}" value="${esc(v)}">`;
+    return `<div class="cfgrow">
+      <div class="cfgmeta"><div class="k">${k}</div><div class="d">${esc(desc)}</div></div>
+      <div class="ctl">${ctl}</div>
+    </div>`;
   }).join('');
 }
 $('#cfgSelect').onchange = renderCfgForm;
@@ -287,17 +336,22 @@ function bindEvents() {
     srvMsg('assistant', d.assistant, d.model, d.ms);
   });
 }
-$('#btnTrainStart').onclick = async () => {
+$('#btnTrainStart').onclick = () => startTrain(false);
+$('#btnTrainResume').onclick = () => startTrain(true);
+async function startTrain(resume) {
   const r = await api('train/start', {method:'POST', headers:{'Content-Type':'application/json'},
-                                      body: JSON.stringify({config: $('#trainCfg').value})});
+                                      body: JSON.stringify({config: $('#trainCfg').value, resume})});
   if (!r.ok) return toast('启动失败：' + r.error);
-  $('#btnTrainStart').disabled = true; $('#btnTrainStop').disabled = false;
-  $('#trainState').textContent = '启动中…'; $('#trainLog').textContent = '';
-  toast('训练已启动，日志：' + r.log);
-};
+  $('#btnTrainStart').disabled = true; $('#btnTrainResume').disabled = true;
+  $('#btnTrainStop').disabled = false;
+  $('#trainState').textContent = resume ? '续训中…' : '启动中…';
+  $('#trainLog').textContent = '';
+  toast(resume ? '从存档续训，日志：' + r.log : '从头训练，日志：' + r.log);
+}
 $('#btnTrainStop').onclick = async () => {
   await api('train/stop', {method:'POST'});
-  $('#btnTrainStart').disabled = false; $('#btnTrainStop').disabled = true;
+  $('#btnTrainStart').disabled = false; $('#btnTrainResume').disabled = false;
+  $('#btnTrainStop').disabled = true;
   $('#trainState').textContent = '已停止';
 };
 
@@ -517,6 +571,7 @@ async function syncState() {
   if (tr.ok) {
     if (tr.running) {
       $('#btnTrainStart').disabled = true;
+      $('#btnTrainResume').disabled = true;
       $('#btnTrainStop').disabled = false;
       $('#trainState').textContent = '训练中 · ' + (tr.config || '');
       if (tr.config && tr.config !== syncState._applied) {
@@ -529,6 +584,7 @@ async function syncState() {
     } else {
       // 之前是"训练中"，现在停了：把按钮恢复
       $('#btnTrainStart').disabled = false;
+      $('#btnTrainResume').disabled = false;
       $('#btnTrainStop').disabled = true;
       $('#trainState').textContent = '已结束';
       syncState._applied = null;

@@ -428,6 +428,8 @@ class Handler(BaseHTTPRequestHandler):
         log_name = f"{name}-{time.strftime('%Y%m%d-%H%M%S')}.log"
         args = [sys.executable, os.path.join(ROOT, "code", "train.py"),
                 "--config", os.path.relpath(p, ROOT), "--parent-pid", str(os.getpid())]
+        # resume 由界面按钮决定：开始训练=从头，继续训练=接着存档（没有存档时训练脚本会自动从头）
+        args.append("resume=true" if body.get("resume") else "resume=false")
         STATE["train"] = spawn(args, log_name,
                                on_line=lambda line: HUB.push("train-log", {"line": line}))
         STATE["train_config"] = os.path.basename(p)
