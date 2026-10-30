@@ -34,7 +34,7 @@ in minutes.
 
 ## Quick start
 Double-click `script\start.bat`; the browser opens the local console at an address like
-`http://127.0.0.1:7788/?t=...`. Five tabs:
+`http://127.0.0.1:49134/?t=...`. Five tabs:
 
 | Tab | What it does |
 |---|---|
@@ -46,6 +46,11 @@ Double-click `script\start.bat`; the browser opens the local console at an addre
 
 > **Closing the cmd window of `start.bat` means exit**: training, the bridge and any signature job
 > stop with it. Closing the browser tab is not an exit — training keeps running; reopen the URL.
+
+Phones and other machines on the same LAN can open `http://<host-LAN-IP>:49135/` — a **read-only
+chat page**: no token, chat only, and the train/config/signature tabs are unreachable. The first
+launch may prompt Windows Firewall; allow Python on **private networks**. Pass `start.bat --no-lan`
+to skip the LAN page.
 
 The command line is no longer a user entry point; `--config` / `--parent-pid` are an internal
 protocol between the WebUI and its child processes.
@@ -134,8 +139,8 @@ It also picks a torch-capable interpreter from PATH by itself, trying `python` /
    the directory actually used is `data_path` in the config;
 4. press **Start**. The log streams live and is also written to
    `.ai_res\cache\train-logs\<config>-<timestamp>.log`;
-5. press **Stop** to stop. To resume, set `resume=true` in the config and start again
-   (a checkpoint with optimizer state is required).
+5. press **Stop** to stop. To continue from the last checkpoint, press **Resume training**
+   (the checkpoint must contain optimizer state).
 
 ### Where the configs are and how to edit them
 
@@ -303,7 +308,6 @@ Common keys:
 | `lr_decay` | `cosine` | `cosine` decay / `none` constant |
 | `min_lr_frac` | 0.1 | Decay floor = `lr × this` |
 | `grad_checkpoint` | `False` | Checkpointing: less VRAM, ~20–30% slower |
-| `resume` | `False` | Continue from `out_path` (needs optimizer/iter inside) |
 | `save_every` | 0 | Force a save every N steps (0 = only on improvement) |
 | `chat_mode` | `True` | `False` = pure continuation model (poetry), no `用户：/助手：` |
 | `chat_temperature` | 0.8 | Sampling temperature; higher is wilder |
@@ -331,11 +335,10 @@ that file — no extra config needed:
 | `grad_accum` | Accumulate gradients to fake a bigger batch |
 | `warmup_iters` / `lr_decay` / `min_lr_frac` | Warmup + cosine decay; a must for long runs |
 | `grad_checkpoint` | Checkpointing: less VRAM, 20–30% slower |
-| `resume` | `true` continues from `out_path` (optimizer state and LR schedule included) |
 | `save_every` | Force a checkpoint every N steps, so a flat validation loss cannot block saving |
 
-Example: set `max_iters=60000` and `resume=true`, then run `script\start.bat (Train tab)` and pick
-`dlqq_llm`.
+Example: set `max_iters=60000`, run `script\start.bat`, pick `dlqq_llm` on the Train tab and press
+**Resume training** (the checkpoint must contain optimizer state).
 
 ---
 
@@ -414,7 +417,7 @@ fineweb  AI-ModelScope/chinese-fineweb-edu
 
 2 GB is chosen from the model size:
 
-- `dlqq_llm` is 29.4 M parameters; at "20 tokens per parameter" it needs ≈ **590 M tokens**;
+- `dlqq_llm` is 31.5 M parameters; at "20 tokens per parameter" it needs ≈ **630 M tokens**;
 - 2 GB of Chinese text ≈ 700 M tokens, plus the existing `firefly-train-1.1M.jsonl`
   (1.1 GB ≈ 400 M tokens) gives ~1.1 B tokens — already more than enough;
 - Downloading all 12.7 GB buys a 29.4 M model nothing but 1–2 hours and 13 GB of disk.
@@ -647,6 +650,8 @@ code\                   all Python
   common.py             find_root / order-preserving properties I/O / watchdog / hide dir
   model_signature.py    weight SHA-256 signatures (stdlib only)
 web\                    frontend served by webui.py (index.html: five tabs)
+  index.html            five tabs: train / chat / server / config / signature
+  chat.html             LAN read-only chat page
 properties\             four training configs
 src\                    corpora (not in git)
 model\                  training output (not in git; model\<name>\<name>.pt plus .pt.sha256)

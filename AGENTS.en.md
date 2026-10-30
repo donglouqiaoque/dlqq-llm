@@ -49,6 +49,7 @@ code/                   all Python
   model_signature.py    weight SHA-256 signatures (compute / verify, stdlib only)
 web/                    frontend, served by webui.py (no separate web server)
   index.html            five tabs: train / chat / server / config / signature
+  chat.html             LAN read-only chat page (served by LANHandler)
 properties/             four training configs (open-sourced, comments written for outsiders)
 model/                  local weights (not in git; model\<name>\<name>.pt)
 src/                    corpora (not in git)
@@ -78,8 +79,14 @@ script\start.bat
   training keeps running and you can simply reopen the URL.
 - **Watchdog**: children poll `--parent-pid` every 3 s via `ctypes` `WaitForSingleObject` on the
   parent handle and call `os._exit(1)` when the parent is gone (protects against a hard-killed webui).
-- **Security**: binds `127.0.0.1` only; every start generates a one-shot token,
-  URL looks like `http://127.0.0.1:<port>/?t=<token>`, and every `/api/*` call checks it.
+- **Job Object**: children also join a `KILL_ON_JOB_CLOSE` job, so when the webui process dies the
+  kernel kills every process in the job — even if the cmd window is force-closed mid-run.
+- **Ports**: the console defaults to `127.0.0.1:49134` (falls back to a random free port with a
+  notice if busy); the LAN read-only chat page defaults to `0.0.0.0:49135`
+  (`--lan-port` changes it, `--no-lan` disables it).
+- **Security**: the console binds `127.0.0.1` only, generates a one-shot token per start and checks
+  it on every `/api/*` call. The LAN port has no token but only serves the chat page,
+  `/api/models` and `POST /api/chat`.
 
 ## 4. WebUI API contract (changing it requires updating `web/index.html` too)
 
@@ -102,6 +109,9 @@ script\start.bat
   turns it into an SSE `server-chat` event, which the "server" tab renders as a Q&A list.
 - SSE frames are `data: <json>\n\n`; one thread per connection, so new long-lived endpoints
   must consider the thread budget.
+- **LAN port** (`LANHandler`) only allows `GET /`, `/chat.html`, `/logo.ico`, `/api/models` and
+  `POST /api/chat`; everything else returns 403. `POST /api/chat` only accepts models listed under
+  `model\` (blocks path traversal). Changing LAN endpoints means updating `web/chat.html` too.
 
 ## 5. Config (properties) conventions
 
@@ -114,7 +124,8 @@ script\start.bat
   order preserved) and back up to `.ai_res\cache\cfg-backup\` first.
 - **`python=`**: empty = use python from PATH; non-empty = use exactly that interpreter, abort if
   it is missing or lacks torch/numpy.
-- **`resume=true`** needs a checkpoint containing `iter` / `optimizer`; otherwise training starts fresh.
+- **Resume is a UI action**: the "Resume training" button sends `resume=true`; the config files no
+  longer carry a `resume` key.
 
 | Key | Meaning |
 |---|---|
@@ -126,7 +137,7 @@ script\start.bat
 | `max_iters` / `eval_interval` / `eval_iters` | step count and eval cadence |
 | `lr` / `warmup_iters` / `lr_decay` / `min_lr_frac` / `weight_decay` / `grad_clip` / `dropout` / `seed` | optimisation |
 | `grad_accum` / `grad_checkpoint` | effective batch / memory saving |
-| `resume` / `save_every` / `save_dtype` / `save_optimizer` | resume and checkpoint size |
+| `save_every` / `save_dtype` / `save_optimizer` | periodic checkpoint / dtype / keep optimizer |
 | `max_vocab` / `val_frac` | vocabulary cap / tail validation split |
 | `python` / `confirm` | interpreter / confirmation |
 
@@ -179,7 +190,8 @@ training config is rejected (it would slow training and may read a half-written 
 - **Character level + short context**: with `block_size` 256 only the tail of a long message is seen.
 - **Small models memorise**: they replay training answers; do not benchmark on the training set.
 - **The bridge is not an agent**: no tool calling, no planning; it only validates the pipeline.
-- **WebUI is single-machine, single-user**: localhost only, token changes per start.
+- **The WebUI console is local-only**: it binds `127.0.0.1` with a one-shot token; the LAN side
+  exposes only the read-only chat page (`0.0.0.0:49135`, no auth — anyone on the LAN can chat).
 - **CPU training** is very slow and has no bf16; use it only to smoke-test tiny models.
 
 ## 9. References

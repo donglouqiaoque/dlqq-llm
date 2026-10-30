@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>鸫楼桥鹊AI大语言模型 · 对话</title>
+<link rel="icon" type="image/x-icon" href="/logo.ico">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e8ee;
+          --muted:#8b93a3; --accent:#4f8cff; --err:#e05656; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg); display:flex; flex-direction:column;
+         overflow:hidden; font:14px/1.6 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; }
+  header { display:flex; align-items:center; gap:12px; padding:10px 18px;
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  header .brand { width:26px; height:26px; border-radius:6px; object-fit:contain; }
+  header h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.5px; }
+  header .tag { margin-left:auto; font-size:12px; color:var(--muted);
+                border:1px solid var(--line); border-radius:20px; padding:2px 10px; }
+  main { flex:1; min-height:0; display:flex; flex-direction:column; padding:14px 18px 16px; }
+  .msgs { flex:1; min-height:0; overflow:auto; padding:2px 2px 10px; }
+  .msg { display:flex; gap:10px; margin-bottom:14px; align-items:flex-start; }
+  .msg.user { flex-direction:row-reverse; }
+  .avatar { flex:0 0 28px; height:28px; border-radius:8px; display:flex; align-items:center;
+            justify-content:center; font-size:11px; background:#20242e; color:var(--muted); }
+  .msg.user .avatar { background:#24344f; color:#a9c6ff; }
+  .bubble { max-width:min(780px, 82%); padding:9px 13px; border-radius:12px;
+            background:#141821; border:1px solid var(--line); white-space:pre-wrap;
+            word-break:break-word; line-height:1.7; }
+  .msg.user .bubble { background:#1b2740; border-color:#2b3d5e; }
+  .bubble.typing::after { content:"▍"; margin-left:2px; color:var(--accent);
+                          animation:blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity:0; } }
+  .hint { color:var(--muted); text-align:center; padding:60px 0 0; font-size:13px; }
+  .composer { border:1px solid var(--line); border-radius:12px; background:#0d1015; padding:8px 10px; }
+  .composer textarea { width:100%; border:0; background:transparent; color:var(--fg); resize:none;
+                       outline:none; font:inherit; line-height:1.65; max-height:150px; overflow:auto; }
+  .bar { display:flex; align-items:center; gap:8px; margin-top:4px; flex-wrap:wrap; }
+  select, button { background:#0d1015; color:var(--fg); border:1px solid var(--line);
+                   border-radius:7px; padding:5px 10px; font:inherit; font-size:13px; }
+  select { max-width:240px; }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { border-color:var(--err); color:var(--err); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .muted { color:var(--muted); font-size:12px; }
+  .spacer { flex:1; }
+</style>
+</head>
+<body>
+<header>
+  <img src="/logo.ico" class="brand" alt="logo">
+  <h1>鸫楼桥鹊AI大语言模型</h1>
+  <span class="tag">局域网 · 只能对话</span>
+</header>
+
+<main>
+  <div class="msgs" id="box"></div>
+  <div class="composer">
+    <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+    <div class="bar">
+      <select id="model" title="选择模型"></select>
+      <span class="muted" id="state"></span>
+      <div class="spacer"></div>
+      <button id="btnNew">新对话</button>
+      <button class="danger" id="btnStop" disabled>停止</button>
+      <button class="primary" id="btnSend">发送</button>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let abort = null;
+let info = null;
+
+function setState(t) { $('#state').textContent = t || ''; }
+
+function hint() {
+  const h = document.createElement('div');
+  h.className = 'hint';
+  h.id = 'hint';
+  h.textContent = '选一个模型，随便聊两句。';
+  $('#box').appendChild(h);
+}
+
+function addMsg(who, text) {
+  const hintEl = $('#hint');
+  if (hintEl) hintEl.remove();
+  const row = document.createElement('div');
+  row.className = 'msg ' + who;
+  const av = document.createElement('div');
+  av.className = 'avatar';
+  av.textContent = who === 'user' ? '我' : 'AI';
+  const b = document.createElement('div');
+  b.className = 'bubble';
+  b.textContent = text;
+  row.append(av, b);
+  $('#box').appendChild(row);
+  $('#box').scrollTop = $('#box').scrollHeight;
+  return b;
+}
+
+async function loadModels() {
+  try {
+    const r = await fetch('/api/models');
+    const d = await r.json();
+    const sel = $('#model');
+    sel.innerHTML = '';
+    const list = d.models || [];
+    for (const m of list) {
+      const o = document.createElement('option');
+      o.value = m.path;
+      o.textContent = m.id;
+      sel.appendChild(o);
+    }
+    if (!list.length) {
+      sel.innerHTML = '<option value="">（没有可用模型）</option>';
+      setState('模型目录是空的');
+    }
+  } catch (e) {
+    setState('模型列表加载失败：' + e.message);
+  }
+}
+
+async function send() {
+  const text = $('#input').value.trim();
+  const model = $('#model').value;
+  if (!text || abort) return;
+  if (!model) { setState('先选一个模型'); return; }
+  $('#input').value = '';
+  $('#input').style.height = 'auto';
+  addMsg('user', text);
+  const bubble = addMsg('assistant', '');
+  bubble.classList.add('typing');
+  $('#btnSend').disabled = true;
+  $('#btnStop').disabled = false;
+  setState('生成中…');
+  abort = new AbortController();
+  let acc = '';
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, text }),
+      signal: abort.signal,
+    });
+    if (!resp.ok) {
+      let msg = await resp.text();
+      try { msg = JSON.parse(msg).error || msg; } catch (e) {}
+      bubble.textContent = '请求失败：' + msg;
+      return;
+    }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const ev = /event: (\w+)\ndata: ([\s\S]*)/.exec(chunk);
+        if (!ev) continue;
+        let data = {};
+        try { data = JSON.parse(ev[2]); } catch (e) { continue; }
+        if (ev[1] === 'meta') {
+          info = data.info || null;
+          if (info) {
+            setState(`${info.name || ''} · ${info.device || ''} · ${info.params_m || '?'} M`);
+          }
+        } else if (ev[1] === 'token') {
+          acc += data.text || '';
+          bubble.textContent = acc;
+          $('#box').scrollTop = $('#box').scrollHeight;
+        } else if (ev[1] === 'done') {
+          acc = data.text || acc;
+          bubble.textContent = acc;
+        } else if (ev[1] === 'error') {
+          bubble.textContent = '错误：' + (data.error || '未知错误');
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') bubble.textContent = acc + '（已停止）';
+    else bubble.textContent = '出错：' + e.message;
+  } finally {
+    bubble.classList.remove('typing');
+    $('#btnSend').disabled = false;
+    $('#btnStop').disabled = true;
+    abort = null;
+    setState('');
+    $('#box').scrollTop = $('#box').scrollHeight;
+  }
+}
+
+$('#btnSend').onclick = send;
+$('#btnStop').onclick = () => { if (abort) abort.abort(); };
+$('#btnNew').onclick = () => { $('#box').innerHTML = ''; hint(); setState(''); };
+$('#input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$('#input').addEventListener('input', e => {
+  e.target.style.height = 'auto';
+  e.target.style.height = Math.min(e.target.scrollHeight, 150) + 'px';
+});
+
+hint();
+loadModels();
+</script>
+</body>
+</html>

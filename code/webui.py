@@ -15,6 +15,7 @@ r"""本地 WebUI 服务
 安全：只绑 127.0.0.1；API 需要启动时生成的一次性 token（地址里带 ?t=）。
 """
 import argparse
+import ctypes
 import json
 import os
 import queue
@@ -65,6 +66,81 @@ def tail_train_log(n=400):
 
 
 # ==================================================================
+# 子进程生命周期：Job Object 兜底
+# ==================================================================
+# 关掉 start.bat 的 cmd 窗口时，WebUI 可能来不及执行清理代码就被系统结束。
+# 把子进程放进一个 KILL_ON_JOB_CLOSE 的 Job：WebUI 进程一消失，内核自动
+# 关掉 job 句柄，job 里的训练/服务/对话进程一起被杀。--parent-pid 看门狗
+# 仍然保留，两层兜底。
+JOB_HANDLE = None
+
+
+def _make_job_object():
+    """建一个“句柄关掉就杀光里面进程”的 Job；失败返回 None（只靠看门狗）。"""
+    if os.name != "nt":
+        return None
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+
+        class _Basic(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32),
+            ]
+
+        class _Io(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class _Extended(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _Basic),
+                ("IoInfo", _Io),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        info = _Extended()
+        info.BasicLimitInformation.LimitFlags = 0x2000    # KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info),
+                                                ctypes.sizeof(info)):
+            kernel32.CloseHandle(job)
+            return None
+        return job
+    except (AttributeError, OSError):
+        return None
+
+
+def _join_job(proc):
+    """把刚起的子进程放进 JOB_HANDLE；失败不影响功能（看门狗仍然有效）。"""
+    if not JOB_HANDLE:
+        return
+    try:
+        ctypes.windll.kernel32.AssignProcessToJobObject(JOB_HANDLE, int(proc._handle))
+    except (AttributeError, OSError):
+        pass
+
+
+# ==================================================================
 # 子进程管理
 # ==================================================================
 class Child:
@@ -83,6 +159,7 @@ class Child:
             text=True, encoding="utf-8", errors="replace", bufsize=1,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
+        _join_job(self.proc)
         self.lines = queue.Queue(maxsize=20000)
         self.on_line = on_line
         self.reader = threading.Thread(target=self._read, daemon=True)
@@ -494,6 +571,9 @@ class Handler(BaseHTTPRequestHandler):
         if c and c.alive():
             return self._err(409, "服务已在运行")
         port = int(body.get("port") or 49128)
+        if port_in_use(port):
+            return self._err(409, f"端口 {port} 已被占用（可能有上次残留的服务进程），"
+                                  "请先结束它，或换一个端口")
         args = [sys.executable, os.path.join(ROOT, "code", "http_server.py"),
                 "--port", str(port), "--events", "--parent-pid", str(os.getpid())]
 
@@ -540,6 +620,68 @@ class Handler(BaseHTTPRequestHandler):
             pass
         finally:
             HUB.drop(q)
+
+
+class LANHandler(Handler):
+    """局域网只读对话页：只放行页面、模型清单和对话接口。
+
+    训练 / 配置 / 签名 / 服务管理 / SSE 一概 403，避免把控制台暴露到内网。
+    """
+
+    server_version = "dlqq-webui-lan/1.0"
+    GET_WHITELIST = ("/", "/chat.html", "/logo.ico", "/api/models")
+    POST_WHITELIST = ("/api/chat",)
+
+    def _auth(self, qs):
+        return True                              # 内网对话页不带 token
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path not in self.GET_WHITELIST:
+            self._err(403, "局域网只开放对话页")
+            return
+        if path in ("/", "/chat.html"):
+            self._send_file(os.path.join(WEB_DIR, "chat.html"),
+                            "text/html; charset=utf-8")
+        elif path == "/logo.ico":
+            self._send_file(os.path.join(ROOT, "script", "logo.ico"),
+                            "image/x-icon")
+        else:
+            self._json({"ok": True, "models": list_models()})
+
+    def do_POST(self):
+        if urlparse(self.path).path not in self.POST_WHITELIST:
+            self._err(403, "局域网只开放对话页")
+            return
+        body = self._body()
+        allowed = {m["path"] for m in list_models()}
+        if (body.get("model") or "").replace("\\", "/") not in allowed:
+            self._err(400, "模型不在清单里")
+            return
+        try:
+            self._chat(body, {})
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        except Exception as e:
+            traceback.print_exc()
+            try:
+                self._err(500, f"{type(e).__name__}: {e}")
+            except OSError:
+                pass
+
+    def _send_file(self, fp, ctype):
+        try:
+            with open(fp, "rb") as f:
+                data = f.read()
+        except OSError:
+            self._err(404, "文件不存在")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
 
 
 CHAT_LOCK = threading.Lock()
@@ -596,6 +738,19 @@ def probe_python(py):
     return {"ok": True, **info}
 
 
+def port_in_use(port, host="127.0.0.1", timeout=0.3):
+    """端口上已经有人在听？用来在启动服务前挡住重复实例。"""
+    s = socket.socket()
+    s.settimeout(timeout)
+    try:
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
 def find_free_port(preferred):
     s = socket.socket()
     try:
@@ -612,15 +767,107 @@ def find_free_port(preferred):
     return port
 
 
+def _lan_ipv4_from_adapters():
+    """用 GetAdaptersInfo 找“像样的”局域网 IPv4：192.168.x.x、有网关、非虚拟网卡。"""
+    if os.name != "nt":
+        return ""
+    from ctypes import wintypes
+
+    class IP_ADDR_STRING(ctypes.Structure):
+        pass
+
+    IP_ADDR_STRING._fields_ = [
+        ("Next", ctypes.POINTER(IP_ADDR_STRING)),
+        ("IpAddress", ctypes.c_char * 16),
+        ("IpMask", ctypes.c_char * 16),
+        ("Context", wintypes.DWORD),
+    ]
+
+    class IP_ADAPTER_INFO(ctypes.Structure):
+        pass
+
+    IP_ADAPTER_INFO._fields_ = [
+        ("Next", ctypes.POINTER(IP_ADAPTER_INFO)),
+        ("ComboIndex", wintypes.DWORD),
+        ("AdapterName", ctypes.c_char * 260),
+        ("Description", ctypes.c_char * 132),
+        ("AddressLength", wintypes.UINT),
+        ("Address", ctypes.c_ubyte * 8),
+        ("Index", wintypes.DWORD),
+        ("Type", wintypes.UINT),
+        ("DhcpEnabled", wintypes.UINT),
+        ("CurrentIpAddress", ctypes.POINTER(IP_ADDR_STRING)),
+        ("IpAddressList", IP_ADDR_STRING),
+        ("GatewayList", IP_ADDR_STRING),
+        ("DhcpServer", IP_ADDR_STRING),
+        ("HaveWins", wintypes.BOOL),
+        ("PrimaryWinsServer", IP_ADDR_STRING),
+        ("SecondaryWinsServer", IP_ADDR_STRING),
+        ("LeaseObtained", wintypes.DWORD),
+        ("LeaseExpires", wintypes.DWORD),
+    ]
+
+    iphlpapi = ctypes.windll.iphlpapi
+    size = wintypes.ULONG(0)
+    iphlpapi.GetAdaptersInfo(None, ctypes.byref(size))      # 先问需要多大
+    buf = ctypes.create_string_buffer(size.value)
+    if iphlpapi.GetAdaptersInfo(buf, ctypes.byref(size)) != 0:
+        return ""
+
+    skip = ("vmware", "virtual", "hyper-v", "wsl", "loopback", "tap", "npcap", "vpn", "ppp")
+    found = []
+    node = ctypes.cast(buf, ctypes.POINTER(IP_ADAPTER_INFO))
+    while node:
+        a = node.contents
+        desc = a.Description.decode("mbcs", "replace").lower()
+        ip = a.IpAddressList.IpAddress.decode("ascii", "replace").rstrip("\x00")
+        gw = a.GatewayList.IpAddress.decode("ascii", "replace").rstrip("\x00")
+        if (ip.startswith("192.168.") and gw not in ("", "0.0.0.0")
+                and not any(k in desc for k in skip)):
+            found.append(ip)
+        node = a.Next
+    return found[0] if found else ""
+
+
+def local_ip():
+    """本机在局域网里的 IPv4。
+
+    优先物理网卡的 192.168.x.x（虚拟网卡、VPN 会被跳过）；实在找不到
+    才退回默认路由的出口地址。拿不到就返回 127.0.0.1。
+    """
+    try:
+        ip = _lan_ipv4_from_adapters()
+        if ip:
+            return ip
+    except (AttributeError, OSError, ValueError):
+        pass
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))          # UDP connect 不发包，只为让系统选出口网卡
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
 def main():
+    global JOB_HANDLE
     ap = argparse.ArgumentParser(description="dlqq-llm 本地 WebUI")
     ap.add_argument("--port", type=int, default=0, help="端口，0 = 自动挑一个空闲的")
     ap.add_argument("--host", default="127.0.0.1", help="监听地址，默认只绑本机")
     ap.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    ap.add_argument("--lan-port", type=int, default=49135,
+                    help="局域网对话页端口，默认 49135")
+    ap.add_argument("--lan-host", default="0.0.0.0",
+                    help="局域网对话页监听地址，默认所有网卡")
+    ap.add_argument("--no-lan", action="store_true", help="不启动局域网对话页")
     a = ap.parse_args()
 
+    JOB_HANDLE = _make_job_object()
     STATE["token"] = secrets.token_urlsafe(12)
-    port = find_free_port(a.port or 7788)
+    want = a.port or 49134
+    port = find_free_port(want)
     common.hide_dir(os.path.join(ROOT, ".ai_res"))
     os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -629,6 +876,22 @@ def main():
     print("  dlqq-llm WebUI")
     print("=" * 66)
     print(f"[地址] {url}")
+    if port != want:
+        print(f"[提示] 端口 {want} 被占用，已改用 {port}")
+
+    lan = None
+    if not a.no_lan:
+        try:
+            lan = ThreadingHTTPServer((a.lan_host, a.lan_port), LANHandler)
+        except OSError as e:
+            print(f"[警告] 局域网对话页没起来（{a.lan_host}:{a.lan_port}）：{e}")
+        else:
+            lan.daemon_threads = True
+            threading.Thread(target=lan.serve_forever, daemon=True,
+                             name="lan-chat").start()
+            print(f"[内网] http://{local_ip()}:{a.lan_port}/   （只有对话页）")
+            print("[提示] 首次可能需要在 Windows 防火墙里允许 Python 访问专用网络")
+
     print("[注意] 关掉本窗口 = 退出，所有子进程（训练/服务）一起结束")
     print("[提示] 关浏览器不影响运行，重新访问上面的地址即可")
     print("=" * 66, flush=True)
@@ -647,6 +910,11 @@ def main():
         print("\n[退出] 收到 Ctrl+C")
     finally:
         stop_all()
+        if lan:
+            try:
+                lan.server_close()
+            except OSError:
+                pass
         print("[退出] 子进程已清理")
 
 

@@ -33,7 +33,7 @@
 
 ## 快速开始
 双击 `script\start.bat`，浏览器会自动打开本地控制台（地址形如
-`http://127.0.0.1:7788/?t=...`）。页面有五个标签：
+`http://127.0.0.1:49134/?t=...`）。页面有五个标签：
 
 | 标签 | 用途 |
 |---|---|
@@ -46,6 +46,10 @@
 > **关掉 `start.bat` 的 cmd 窗口 = 退出**：训练、桥接服务、签名任务都会一起结束。
 > 关掉浏览器标签**不算**退出，训练照跑，重新访问控制台地址即可。
 > 每个模型都带同名 `.pt.sha256`，可在「签名」页核对后再加载。
+
+局域网里的手机 / 其它电脑可以打开 `http://<本机IP>:49135/`：那是**只读对话页**，
+不需要 token，只能选模型聊天，训练、配置、签名都看不到。第一次启动可能要在
+Windows 防火墙里允许 Python 访问**专用网络**；不想开局域网页面就 `start.bat --no-lan`。
 
 命令行不再是使用入口：`--config` / `--parent-pid` 这些参数只由 WebUI 内部调用。
 
@@ -129,7 +133,7 @@ python=D:\Soft\Python\Python3_13_9\python.exe
 3. **语料**下拉显示 `src\` 下每个语料目录的文件数与体积，仅供核对——实际读哪个目录由配置里的
    `data_path` 决定；
 4. 点【开始训练】。日志会实时滚动，同时写入 `.ai_res\cache\train-logs\<配置名>-<时间>.log`；
-5. 想停就点【停止】；想续训，把配置里的 `resume` 改成 `true` 再点开始（需要有带优化器的存档）。
+5. 想停就点【停止】；想接着上次的存档训，点【继续训练】（存档里要有优化器状态）。
 
 页面上看不到参数？参数都在配置文件里：`properties\` 下四个文件（`chat_demo` / `dlqq_exam` /
 `dlqq_llm` / `dlqq_poem`），键和含义见下文的参数表，也可以在「配置」页直接改。
@@ -254,7 +258,6 @@ src\
 | `lr_decay` | `cosine` | `cosine` 余弦退火 / `none` 恒定 |
 | `min_lr_frac` | 0.1 | 退火终点 = `lr × 这个比例` |
 | `grad_checkpoint` | `False` | 梯度检查点：省显存，慢约 20–30% |
-| `resume` | `False` | 从 `out_path` 接着训（要里面存过 optimizer/iter） |
 | `save_every` | 0 | 每 N 步强制存档（0 = 只在验证变好时存） |
 | `chat_mode` | `True` | `False` = 纯续写模型（诗词），提示词不加「用户：／助手：」 |
 | `chat_temperature` | 0.8 | 对话采样温度，越大越发散 |
@@ -281,10 +284,10 @@ src\
 | `grad_accum` | 显存不够时用梯度累积凑等效 batch |
 | `warmup_iters` / `lr_decay` / `min_lr_frac` | 学习率预热 + 余弦退火，长训练必开 |
 | `grad_checkpoint` | 梯度检查点，省显存（慢 20–30%） |
-| `resume` | 改成 `true` 后从 `out_path` 接着训（优化器状态、学习率进度都接得上） |
 | `save_every` | 每 N 步强制存档，防止「验证损失一直没变好 → 一直不存盘」 |
 
-例：把 `max_iters` 调到 60000、`resume=true`，双击 `script\start.bat`，在「训练」页选 `dlqq_llm` 即可继续。
+例：把 `max_iters` 调到 60000，双击 `script\start.bat`，在「训练」页选 `dlqq_llm`、点【继续训练】
+即可接着上次的存档（存档里要有优化器状态）。
 
 ---
 
@@ -361,7 +364,7 @@ fineweb  AI-ModelScope/chinese-fineweb-edu
 
 默认 2 GB 是按模型规模算的：
 
-- `dlqq_llm` 是 29.4 M 参数，按「每参数 20 token」≈ **5.9 亿 token** 就够；
+- `dlqq_llm` 是 31.5 M 参数，按「每参数 20 token」≈ **6.3 亿 token** 就够；
 - 2 GB 中文文本 ≈ 7 亿 token，加上原来的 `firefly-train-1.1M.jsonl`（1.1 GB ≈ 4 亿 token），
   总量约 11 亿 token，已经超过所需；
 - 全下 12.7 GB 对 29.4 M 模型没有收益，只是多花 1–2 小时下载和 13 GB 硬盘。
@@ -583,6 +586,7 @@ code\                   所有 Python
   model_signature.py    权重 SHA-256 签名（只依赖标准库）
 web\                    前端页面（由 webui.py 托管）
   index.html            五个标签：训练 / 对话 / 服务 / 配置 / 签名
+  chat.html             局域网只读对话页
 properties\             四个训练配置
 src\                    语料目录（不进版本库）
 model\                  训练产物（不进版本库；model\<名字>\<名字>.pt 与同名 .pt.sha256）

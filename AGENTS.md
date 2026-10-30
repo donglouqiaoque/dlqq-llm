@@ -45,6 +45,7 @@ code/                   所有 Python
   model_signature.py    权重 SHA-256 签名（compute / verify，纯标准库）
 web/                    前端（被 webui.py 托管，不需要单独服务器）
   index.html            五个页签：训练 / 对话 / 服务 / 配置 / 签名
+  chat.html             局域网只读对话页（LANHandler 托管）
 properties/             四个训练配置（要开源，注释写给外人看）
 model/                  本地权重（不进版本库；model\<名字>\<名字>.pt）
 src/                    语料目录（不进版本库）
@@ -71,8 +72,12 @@ script\start.bat
   `taskkill /F /T`）；**关浏览器标签不算退出**，训练照常跑，重新访问控制台地址即可。
 - **看门狗**：子进程按 `--parent-pid` 每 3 秒用 `ctypes` `WaitForSingleObject` 检查父进程句柄，
   父进程一消失就 `os._exit(1)`（防 webui 被强杀留下孤儿）。
-- **安全**：只绑 `127.0.0.1`；每次启动生成一次性 token，地址形如 `http://127.0.0.1:<port>/?t=<token>`，
-  `/api/*` 全部校验 token。
+- **Job Object**：子进程还会加入一个 `KILL_ON_JOB_CLOSE` 的 Job，WebUI 进程一消失，内核
+  直接杀掉 job 里的全部进程；cmd 窗口被强制关闭时也能兜住，不依赖看门狗轮询。
+- **端口**：控制台默认 `127.0.0.1:49134`（被占用时退到随机空闲端口并打印提示）；
+  局域网只读对话页默认 `0.0.0.0:49135`（`--lan-port` 改端口，`--no-lan` 关掉）。
+- **安全**：控制台只绑 `127.0.0.1`，每次启动生成一次性 token，`/api/*` 全部校验；
+  局域网端口不校验 token，但只放行对话页 + `/api/models` + `POST /api/chat`。
 
 ## 四、WebUI 接口约定（改接口必须同步 `web/index.html`）
 
@@ -94,6 +99,9 @@ script\start.bat
 - 桥接服务每次完成对话会往 stdout 打一行 `@@EV@@ {json}`（`--events`），
   webui 读线程按前缀识别后转成 SSE `server-chat`，页面「服务」页据此显示问答。
 - SSE 用 `data: <json>\n\n`，一条连接一个线程；新增长连接接口要考虑线程上限。
+- **局域网端口**（`LANHandler`）只放行 `GET /`、`/chat.html`、`/logo.ico`、`/api/models`
+  与 `POST /api/chat`，其余路径一律 403；`POST /api/chat` 的模型必须在 `model\` 清单里
+  （挡路径穿越）。改局域网接口时同步 `web/chat.html`。
 
 ## 五、配置文件（properties）约定
 
@@ -104,7 +112,7 @@ script\start.bat
 - **保存规则**：一律走 `common.save_properties`（只改 value，保留注释/空行/顺序），
   保存前备份到 `.ai_res\cache\cfg-backup\`。
 - **`python=` 语义**：留空 = 用 PATH 上的 python；填了 = 只认它，缺失直接终止。
-- **`resume=true`** 需要有带 `iter` / `optimizer` 的存档才会续训。
+- **续训由界面决定**：训练页【继续训练】按钮会传 `resume=true`，配置里不再有 `resume` 键。
 
 | 键 | 含义 |
 |---|---|
@@ -116,7 +124,7 @@ script\start.bat
 | `max_iters` / `eval_interval` / `eval_iters` | 步数与评估节奏 |
 | `lr` / `warmup_iters` / `lr_decay` / `min_lr_frac` / `weight_decay` / `grad_clip` / `dropout` / `seed` | 优化 |
 | `grad_accum` / `grad_checkpoint` | 等效 batch / 省显存 |
-| `resume` / `save_every` / `save_dtype` / `save_optimizer` | 续训与存档 |
+| `save_every` / `save_dtype` / `save_optimizer` | 定时存档 / 存档精度 / 是否存优化器 |
 | `max_vocab` / `val_frac` | 词表上限 / 尾部验证集比例 |
 | `python` / `confirm` | 解释器 / 二次确认 |
 
@@ -163,7 +171,8 @@ script\start.bat
 - **字符级 + 短上下文**：`block_size` 256 时一条长消息只能看到最后一段。
 - **小模型会背语料**：同题复现能力强，换问法就露馅；不要拿训练题报分数。
 - **桥接服务不是 agent**：不调用工具、不规划，只适合验证链路。
-- **WebUI 单机单用户**：只绑本机、token 每次启动变化，不适合暴露到局域网。
+- **WebUI 控制台只对本机**：控制台绑 `127.0.0.1` + 一次性 token；局域网只暴露只读对话页
+  （`0.0.0.0:49135`，无鉴权，同一内网的人都能聊）。
 - **CPU 训练**很慢且不启用 bf16，只建议小模型跑通流程。
 
 ## 九、参考资料

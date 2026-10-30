@@ -35,6 +35,7 @@ import json
 import time
 import uuid
 import argparse
+import socket
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -827,6 +828,33 @@ def main():
         common.start_parent_watchdog(a.parent_pid)
     POOL = ModelPool(reg, a.device, a.max_loaded, a)
 
+    # 端口独占：allow_reuse_address 在 Windows 上允许多个进程绑同一端口，
+    # 后起的实例看似启动成功，连接却被旧进程抢走/复位。关掉它，第二个实例
+    # 会直接拿到 WinError 10048，而不是悄悄共享。
+    class _ExclusiveServer(ThreadingHTTPServer):
+        allow_reuse_address = False
+
+        def server_bind(self):
+            # Windows 独占绑定：别的进程（包括带 SO_REUSEADDR 的）不能再绑同一端口。
+            if os.name == "nt":
+                try:
+                    self.socket.setsockopt(socket.SOL_SOCKET,
+                                           socket.SO_EXCLUSIVEADDRUSE, 1)
+                except (AttributeError, OSError):
+                    pass
+            super().server_bind()
+
+    try:
+        srv = _ExclusiveServer((a.host, a.port), Handler)
+    except OSError as e:
+        if getattr(e, "winerror", None) == 10048:
+            print(f"[错误] 端口 {a.port} 已被占用：可能还有上一个服务进程没退出。")
+            print("       先结束占用它的进程，或换一个端口（--port <其它端口>）再启动。")
+        else:
+            print(f"[错误] 无法监听 {a.host}:{a.port}：{e}")
+        sys.exit(1)
+    srv.daemon_threads = True
+
     print("=" * 68)
     print("  桥接服务：本地模型（OpenAI 兼容，多模型 + 懒加载）")
     print("=" * 68)
@@ -851,8 +879,6 @@ def main():
     print("  停止服务：在这个窗口按 Ctrl+C")
     print("=" * 68)
 
-    srv = ThreadingHTTPServer((a.host, a.port), Handler)
-    srv.daemon_threads = True
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
