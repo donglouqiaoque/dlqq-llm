@@ -10,6 +10,7 @@ r"""工程级公共工具
 """
 import ctypes
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -128,12 +129,24 @@ def resolve_path(root, p):
     return p if os.path.isabs(p) else os.path.normpath(os.path.join(root, p))
 
 
+def config_stem(name):
+    """配置名统一成不带 .properties 的形式。
+
+    界面下拉给的是文件名（chat_demo.properties），内部一律用 chat_demo。
+    """
+    name = (name or "").strip()
+    if name.lower().endswith(".properties"):
+        name = name[:-len(".properties")]
+    return name
+
+
 def config_model(root, name):
     """配置名 → (模型绝对路径 | None, props)。
 
     `model=` 里只写名字（不带 .pt），按 model\\<名字>\\<名字>.pt 解析；
     权重不存在时返回 (None, props)，由调用方决定是跳过还是报错。
     """
+    name = config_stem(name)
     props = load_properties(os.path.join(root, "properties", name + ".properties"))
     m = (props.get("model") or "").strip()
     if not m:
@@ -160,6 +173,48 @@ def chat_configs(root):
                         "model": (props.get("model") or name).strip(),
                         "path": path})
     return out
+
+
+def resolve_python(root, config_name=""):
+    """训练 / 对话要用的解释器。
+
+    返回 (exe, source)：source 是 "config" / "python" / "python3" / "py"；
+    解析失败返回 (None, 原因)，由调用方原样展示给用户。
+    """
+    config_name = config_stem(config_name)
+    props = {}
+    if config_name:
+        props = load_properties(os.path.join(root, "properties", config_name + ".properties"))
+    raw = (props.get("python") or "").strip()
+    if raw:
+        p = os.path.expandvars(os.path.expanduser(raw))
+        if not os.path.isabs(p):
+            p = os.path.normpath(os.path.join(root, p))
+        if os.path.isdir(p):
+            p = os.path.join(p, "python.exe")
+        if os.path.basename(p).lower() in ("pythonw.exe", "pythonw"):
+            p = os.path.join(os.path.dirname(p), "python.exe")
+        if os.path.isfile(p):
+            return p, "config"
+        return None, f"配置 {config_name} 里的 python= 指向的文件不存在：{p}"
+    for name in ("python", "python3", "py"):
+        exe = shutil.which(name)
+        if not exe:
+            continue
+        if name == "py":
+            # py 只是启动器，解析它真正会用的解释器，避免“写的是 py、跑的是别的版本”
+            try:
+                r = subprocess.run([exe, "-c", "import sys;print(sys.executable)"],
+                                   capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", timeout=20)
+                real = (r.stdout or "").strip().splitlines()
+                real = real[-1] if real else ""
+            except (OSError, subprocess.SubprocessError):
+                real = ""
+            if real and os.path.isfile(real):
+                return real, name
+        return exe, name
+    return None, "没有指定 python=，PATH 上也找不到 python / python3 / py"
 
 
 def hide_dir(path):

@@ -15,8 +15,12 @@
 1. **技术栈固定**：Python 3.10+ / PyTorch 2.x。后端只允许 `torch`、`numpy` 两个第三方库，
    其余一律标准库；前端只允许原生 HTML/CSS/JS，**不引框架、不引 CDN**（断网也要能用）。
 2. **不引入 tokenizer / HuggingFace / transformers**：字符级模型，词表由 `code/train.py` 自己统计。
-3. **禁止执行任何 git 命令**（含 `status` / `diff` / `log`），**禁止读写 `.git` 目录**；
-   提交状态只能问用户。
+3. **git 权限分三层，禁止放宽**：写操作（`commit` / `push` / `add` / `reset` / `checkout` 等）
+   **无论用户是否授权都绝对禁止**；`.git` 目录**无论用户是否授权都绝对禁止读写**，无论是标准
+   编辑工具（读/写/编辑）还是执行脚本或命令，一律禁止读写 `.git` 目录下的任何文件（读也不行，
+   防止把只读命令写成写/删命令）；只有 `status` / `diff` / `log` 等只读命令允许在用户**主动说明**
+   时授权一次，用完立即停止，后续禁止继续使用，除非用户再次主动说明，不存在“用户默许”“用户之前
+   说过”之类的理由。
 4. **禁止用脚本批量改写源码**：逐文件、逐处确认后再改；大范围调整先出清单。
 5. **禁止 AI 执行有副作用的操作**：训练、下载/清洗语料、删除文件、启动 WebUI 或桥接服务，
    一律交给用户。AI 只做只读检查、语法与静态检查、文档改动。
@@ -28,18 +32,28 @@
    （`model\<名字>\<名字>.pt` 与同名 `.pt.sha256` 成对），语料备份在 `dlqq-llm-dataset`。
 10. **README / AGENTS 不写被忽略路径的细节**：只允许「缓存可能放在 `.ai_res`」这类提示，
     具体结构写进 `.ai_res\AIRES.md`。
+11. **先看目录再创建**：新建任何文件或目录之前，先列一下当前目录（确认路径、命名、
+    是否已存在），禁止凭空拼路径、造目录。
+12. **先回答问题，别动手**：用户只是提问、确认、咨询或讨论时，**只回答**——不改代码、不改文件、
+    不执行脚本或命令、不启动进程、不改系统设置、不跑测试。先用现有信息把结论说清楚；只有用户
+    明确要求「改」「修」「执行」时才动手。拿不准是不是「只是问问」时，按「只是问问」处理。
+13. **跟随用户语言**：用户用哪种语言提问，就用哪种语言思考和回复；没有明确语言时默认用
+    简体中文思考和回复。
+14. **中英文文档必须同步**：修改 `AGENTS.md` / `AGENTS.en.md`、`README.md` / `README.en.md` 时，
+    必须中英文两份一起改，不能只改其中一个。
 
 ## 二、目录结构（当前架构）
 
 ```
 start.bat 之外的一切都在 code\ 与 web\ 里，script\ 只留入口。
 script/                 双击入口（唯一）
-  start.bat             找 python → 前台起 code\webui.py → 打开浏览器
+  start.bat             优先用随包的 .python_env 运行 code\webui.py，缺失才回退 PATH → 打开浏览器
   logo.ico              快捷方式图标
 code/                   所有 Python
   webui.py              本地 Web 服务：静态页 + JSON API + SSE + 子进程管理
   train.py              训练（数据管线 + 模型 + 训练循环 + 采样）
   chat.py               对话核心：ChatSession（load / reply_stream / set_params）
+  chat_worker.py        对话子进程：常驻 ChatSession，stdin/stdout 走 JSON 行
   http_server.py        OpenAI 兼容桥接服务（ThreadingHTTPServer，多模型懒加载）
   common.py             find_root / properties 保序读写 / 路径解析 / 父进程看门狗 / 隐藏目录
   model_signature.py    权重 SHA-256 签名（compute / verify，纯标准库）
@@ -59,23 +73,27 @@ src/                    语料目录（不进版本库）
 
 ```
 script\start.bat
-  └─ python code\webui.py            ← 前台运行，控制台即生命周期锚点
-       ├─ 子进程 python code\train.py --config <cfg> --parent-pid <webui_pid>
-       ├─ 子进程 python code\http_server.py --port <port> --events --parent-pid <webui_pid>
-       ├─ 子进程 python code\model_signature.py --mode compute|verify --parent-pid <webui_pid>
-       └─ 进程内 ChatSession（torch + 模型常驻 webui 进程）
+  └─ .python_env\python.exe code\webui.py    ← 前台运行；只带标准库，不 import torch
+       ├─ 子进程 <用户 python> code\train.py --config <cfg> --parent-pid <webui_pid>
+       ├─ 子进程 <用户 python> code\chat_worker.py --config <cfg> --parent-pid <webui_pid>
+       ├─ 子进程 <用户 python> code\http_server.py --port <port> --events --parent-pid <webui_pid>
+       └─ 子进程 .python_env\python.exe code\model_signature.py --mode compute|verify --parent-pid <webui_pid>
 ```
 
 - **没有面向用户的 CLI**：文档不介绍命令行用法；`--config` / `--parent-pid` / `--events` 等
   参数是 WebUI 与子进程之间的**内部协议**，不承诺兼容。
+- **解释器分工**：WebUI 与签名用随包的 `.python_env`（只有标准库）；训练 / 对话 / 桥接服务用
+  `common.resolve_python()` 解析出的用户 Python（`properties\python=`，留空用 PATH），解析失败
+  直接报错，不回退。
 - **生命周期**：关掉 `start.bat` 的 cmd 窗口 = 退出（先 `terminate()` 子进程，5 秒不退再
   `taskkill /F /T`）；**关浏览器标签不算退出**，训练照常跑，重新访问控制台地址即可。
 - **看门狗**：子进程按 `--parent-pid` 每 3 秒用 `ctypes` `WaitForSingleObject` 检查父进程句柄，
   父进程一消失就 `os._exit(1)`（防 webui 被强杀留下孤儿）。
 - **Job Object**：子进程还会加入一个 `KILL_ON_JOB_CLOSE` 的 Job，WebUI 进程一消失，内核
   直接杀掉 job 里的全部进程；cmd 窗口被强制关闭时也能兜住，不依赖看门狗轮询。
-- **端口**：控制台默认 `127.0.0.1:49134`（被占用时退到随机空闲端口并打印提示）；
-  局域网只读对话页默认 `0.0.0.0:49135`（`--lan-port` 改端口，`--no-lan` 关掉）。
+- **端口**：控制台默认 `127.0.0.1:49134`；被占用时**不自动换端口**，提示输入新端口，
+  直接回车退出（`--port` 指定时同样处理）；局域网只读对话页默认 `0.0.0.0:49135`
+  （`--lan-port` 改端口，`--no-lan` 关掉；占用时仅警告继续）。
 - **安全**：控制台只绑 `127.0.0.1`，每次启动生成一次性 token，`/api/*` 全部校验；
   局域网端口不校验 token，但只放行对话页 + `/api/models` + `POST /api/chat`。
 
@@ -83,7 +101,7 @@ script\start.bat
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/env` | 解释器与依赖探测（版本 / torch / CUDA） |
+| GET | `/api/env` | `config=` 或 `all=1` 查询/检测用户 Python（`check=1` 才 probe；按绝对路径记住已验证） |
 | GET | `/api/configs` | 配置列表 + 解析后的键值 |
 | GET | `/api/models` | `model\**\*.pt` 清单（含是否已签名） |
 | GET | `/api/chat/configs` | 对话下拉用：能对上权重的配置名 + 模型名 |

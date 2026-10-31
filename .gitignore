@@ -20,4 +20,8 @@ __pycache__
 !chat_demo*
 # 排除配置文件
 !properties/*
+# 排除Python运行环境（Python运行环境在Release包中提供，仓库里面不包含）
+.python_env
+# 存放一些仅开发使用的脚本和工具
+.tools
 #-------------------------

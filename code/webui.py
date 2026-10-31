@@ -19,6 +19,7 @@ import ctypes
 import json
 import os
 import queue
+import re
 import secrets
 import socket
 import subprocess
@@ -146,7 +147,7 @@ def _join_job(proc):
 class Child:
     """一个子进程 + 读线程；退出时统一清理。"""
 
-    def __init__(self, args, cwd=None, log_path=None, on_line=None):
+    def __init__(self, args, cwd=None, log_path=None, on_line=None, stdin_pipe=False):
         self.args = args
         self.log = None
         if log_path:
@@ -155,7 +156,7 @@ class Child:
         self.proc = subprocess.Popen(
             args, cwd=cwd or ROOT,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin_pipe else subprocess.DEVNULL,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
@@ -191,6 +192,17 @@ class Child:
             except (OSError, ValueError):
                 pass
 
+    def send(self, obj):
+        """给子进程发一行 JSON（只对 stdin_pipe=True 的进程有效）。"""
+        if not self.proc.stdin:
+            return False
+        try:
+            self.proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            self.proc.stdin.flush()
+            return True
+        except (OSError, ValueError):
+            return False
+
     def alive(self):
         return self.proc.poll() is None
 
@@ -224,9 +236,9 @@ def stop_all():
     CHILDREN.clear()
 
 
-def spawn(args, log_name=None, on_line=None):
+def spawn(args, log_name=None, on_line=None, stdin_pipe=False):
     log_path = os.path.join(LOG_DIR, log_name) if log_name else None
-    c = Child(args, ROOT, log_path, on_line)
+    c = Child(args, ROOT, log_path, on_line, stdin_pipe)
     CHILDREN.append(c)
     return c
 
@@ -446,8 +458,66 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "running": bool(c and c.alive()),
                         "port": STATE.get("server_port")})
         elif path == "/api/env":
-            py = (qs.get("py") or [sys.executable])[0]
-            self._json(probe_python(py))
+            all_flag = (qs.get("all") or ["0"])[0] not in ("", "0", "false")
+            check = (qs.get("check") or ["0"])[0] not in ("", "0", "false")
+            if all_flag:
+                items = []
+                seen = {}
+                for item in common.chat_configs(ROOT):
+                    name = item["name"]
+                    exe, source = common.resolve_python(ROOT, name)
+                    if not exe:
+                        items.append({"config": name, "python": "", "source": source,
+                                      "verified": False, "info": None, "ok": False,
+                                      "error": source})
+                        continue
+                    key = _py_key(exe)
+                    if key in seen:
+                        base = seen[key]
+                        items.append({"config": name, "python": exe, "source": source,
+                                      "verified": base["verified"], "info": base["info"],
+                                      "ok": base["ok"]})
+                        continue
+                    known = verified_info(exe)
+                    info = known["info"] if known else None
+                    if check and not known:
+                        info = probe_python(exe, use_cache=False)
+                        if info.get("ok"):
+                            remember_verified(exe, info)
+                    verified = bool(info and info.get("ok"))
+                    ok = verified and bool(info.get("torch"))
+                    entry = {"config": name, "python": exe, "source": source,
+                             "verified": verified, "info": info, "ok": ok}
+                    seen[key] = entry
+                    items.append(entry)
+                all_ok = bool(items) and all(x.get("ok") for x in items)
+                return self._json({"ok": all_ok, "verified": all_ok,
+                                   "paths": items, "webui_python": sys.executable})
+            cfg = common.config_stem((qs.get("config") or [""])[0])
+            exe = ((qs.get("py") or [""])[0] or "").strip()
+            source = "config"
+            if not exe:
+                if not cfg:
+                    return self._json({"ok": False, "error": "缺少 config 参数"})
+                exe, source = common.resolve_python(ROOT, cfg)
+                if not exe:
+                    return self._json({"ok": False, "error": source, "tried": []})
+            known = verified_info(exe)
+            if not check:
+                return self._json({"ok": True, "verified": bool(known),
+                                   "user_python": exe, "source": source,
+                                   "config": cfg or None,
+                                   "webui_python": sys.executable,
+                                   "info": known["info"] if known else None})
+            info = probe_python(exe, use_cache=False)
+            info["webui_python"] = sys.executable
+            info["user_python"] = exe
+            info["source"] = source
+            info["config"] = cfg or None
+            info["verified"] = bool(info.get("ok"))
+            if info.get("ok"):
+                remember_verified(exe, info)
+            self._json(info)
         elif path == "/api/events":
             self._events()
         else:
@@ -509,8 +579,24 @@ class Handler(BaseHTTPRequestHandler):
         if c and c.alive():
             return self._err(409, "已有训练在跑")
         name = os.path.splitext(os.path.basename(p))[0]
+        py, src = common.resolve_python(ROOT, name)
+        if not py:
+            return self._err(400, src)
+        known = verified_info(py)
+        if not known:
+            return self._err(400, "当前配置的 Python 还没检测过；请先在训练页点“测试环境”")
+        info = known["info"]
+        miss = [n for n in ("torch", "numpy") if not info.get(n)]
+        if miss:
+            return self._err(400, f"训练解释器缺少 {' / '.join(miss)}：{py}")
+        try:
+            ver = tuple(int(x) for x in info["version"].split(".")[:2])
+        except (KeyError, ValueError):
+            ver = (0, 0)
+        if ver < (3, 10):
+            return self._err(400, f"Python 版本过低（需要 3.10+）：{info['version']}")
         log_name = f"{name}-{time.strftime('%Y%m%d-%H%M%S')}.log"
-        args = [sys.executable, os.path.join(ROOT, "code", "train.py"),
+        args = [py, os.path.join(ROOT, "code", "train.py"),
                 "--config", os.path.relpath(p, ROOT), "--parent-pid", str(os.getpid())]
         # resume 由界面按钮决定：开始训练=从头，继续训练=接着存档（没有存档时训练脚本会自动从头）
         args.append("resume=true" if body.get("resume") else "resume=false")
@@ -526,8 +612,8 @@ class Handler(BaseHTTPRequestHandler):
         STATE[which] = None
         self._json({"ok": True})
 
-    def _chat(self, body, qs):
-        cfg = (body.get("config") or "").strip()
+    def _chat(self, body, qs, lan=False):
+        cfg = common.config_stem(body.get("config") or "")
         model = body.get("model") or ""
         # 前端传 messages（多轮）；也兼容旧的单条 text
         msgs = body.get("messages")
@@ -567,21 +653,61 @@ class Handler(BaseHTTPRequestHandler):
         if running and training_model and mid == training_model:
             return self._err(409, f"{mid} 正在训练，换一个模型对话")
 
-        import chat as chat_mod
-        try:
-            s = get_chat_session(path, cfg)
-            self._sse_start()
-            self._sse("meta", {"model": mid, "config": cfg or None, "info": s.info()})
-            pieces = []
-            for piece in s.reply_stream(text):
-                pieces.append(piece)
-                self._sse("token", {"text": piece})
-            self._sse("done", {"text": chat_mod._clean_final("".join(pieces))})
-        except (OSError, RuntimeError) as e:
-            traceback.print_exc()
+        key = cfg or mid
+        py, src = common.resolve_python(ROOT, key)
+        if not py:
+            return self._err(400, src)
+        known = verified_info(py)
+        if not known:
+            if not lan:
+                return self._err(400, "当前配置的 Python 还没检测过；请先在对话页点“测试环境”")
+            probe = probe_python(py, use_cache=False)
+            if not probe.get("ok") or not probe.get("torch"):
+                return self._err(400, "对话失败：Python 环境检测不通过：" +
+                                 (probe.get("error") or "缺少 torch"))
+            remember_verified(py, probe)
+            known = {"info": probe}
+        if not known["info"].get("torch"):
+            return self._err(400, f"对话解释器缺少 torch：{py}")
+        with CHAT_LOCK:
             try:
-                self._sse("error", {"error": f"{type(e).__name__}: {e}"})
-            except OSError:
+                w = ensure_worker(key, py, key)
+            except RuntimeError as e:
+                return self._err(502, str(e))
+            rid = f"{int(time.time() * 1000)}-{threading.get_ident()}"
+            if not w["child"].send({"id": rid, "op": "chat", "text": text}):
+                _stop_worker()
+                return self._err(502, "对话进程已退出，请重试")
+            self._sse_start()
+            deadline = time.time() + CHAT_TIMEOUT
+            try:
+                while True:
+                    if time.time() > deadline:
+                        self._sse("error", {"error": "生成超时"})
+                        break
+                    try:
+                        msg = w["queue"].get(timeout=1.0)
+                    except queue.Empty:
+                        if not w["child"].alive():
+                            _stop_worker()
+                            self._sse("error", {"error": "对话进程已退出"})
+                            break
+                        continue
+                    if msg.get("id") != rid:
+                        continue
+                    ev = msg.get("event")
+                    if ev == "meta":
+                        self._sse("meta", {"model": mid, "config": cfg or None,
+                                           "info": msg.get("info") or {}})
+                    elif ev == "token":
+                        self._sse("token", {"text": msg.get("text") or ""})
+                    elif ev == "done":
+                        self._sse("done", {"text": msg.get("text") or ""})
+                        break
+                    elif ev == "error":
+                        self._sse("error", {"error": msg.get("error") or "未知错误"})
+                        break
+            except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
 
     def _server_start(self, body):
@@ -592,11 +718,40 @@ class Handler(BaseHTTPRequestHandler):
         if port_in_use(port):
             return self._err(409, f"端口 {port} 已被占用（可能有上次残留的服务进程），"
                                   "请先结束它，或换一个端口")
-        args = [sys.executable, os.path.join(ROOT, "code", "http_server.py"),
+        cfgs = [common.config_stem(n) for n in (body.get("configs") or [])
+                if isinstance(n, str) and n.strip()]
+        probe = cfgs[0] if cfgs else ""
+        if not probe:
+            all_cfgs = common.chat_configs(ROOT)
+            probe = all_cfgs[0]["name"] if all_cfgs else ""
+        if not probe:
+            return self._err(400, "没有可用配置，无法启动桥接服务")
+        targets = cfgs or [c["name"] for c in common.chat_configs(ROOT)]
+        if not targets:
+            return self._err(400, "没有可用配置，无法启动桥接服务")
+        checked = {}
+        for name in targets:
+            exe, source = common.resolve_python(ROOT, name)
+            if not exe:
+                return self._err(400, f"配置 {name}：{source}")
+            key = _py_key(exe)
+            if key in checked:
+                continue
+            known = verified_info(exe)
+            if not known:
+                return self._err(400, f"配置 {name} 的 Python 还没检测过；"
+                                      "请先在服务页点“测试环境”")
+            if not known["info"].get("torch"):
+                return self._err(400, f"配置 {name} 的 Python 缺少 torch：{exe}")
+            checked[key] = exe
+        if len(checked) > 1:
+            return self._err(400, "全部配置对应多个不同的 Python，无法用一个服务进程启动；"
+                                  "请让 properties 的 python= 一致，或只选一个配置")
+        py = next(iter(checked.values()))
+        args = [py, os.path.join(ROOT, "code", "http_server.py"),
                 "--port", str(port), "--events", "--parent-pid", str(os.getpid())]
-        for name in (body.get("configs") or []):
-            if isinstance(name, str) and name.strip():
-                args += ["--config", name.strip()]
+        for name in targets:
+            args += ["--config", name]
 
         def on_line(line):
             if line.startswith("@@EV@@ "):
@@ -682,7 +837,7 @@ class LANHandler(Handler):
             self._err(400, "配置不在清单里")
             return
         try:
-            self._chat(body, {})
+            self._chat(body, {}, lan=True)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         except Exception as e:
@@ -707,59 +862,120 @@ class LANHandler(Handler):
         self.wfile.write(data)
 
 
-CHAT_LOCK = threading.Lock()
-CHAT_SESSION = {"path": "", "obj": None}
+CHAT_LOCK = threading.RLock()
+CHAT_TIMEOUT = 600
+CHAT_WORKER = {"key": "", "child": None, "queue": None}
 
 
-def get_chat_session(path, config_name=""):
-    """模型常驻内存；换配置/模型时释放旧的（含显存）。"""
-    import chat as chat_mod
-    key = config_name or path
-    with CHAT_LOCK:
-        if CHAT_SESSION["path"] == key and CHAT_SESSION["obj"] is not None:
-            return CHAT_SESSION["obj"]
-        CHAT_SESSION["obj"] = None
-        CHAT_SESSION["path"] = ""
-        import gc
-        gc.collect()
+def _stop_worker():
+    """停掉对话子进程（换配置、进程死掉、退出时都走这里）。"""
+    w = CHAT_WORKER
+    child = w.get("child")
+    if child:
+        child.send({"op": "quit"})
+        child.stop()
+    w.update(key="", child=None, queue=None)
+
+
+def ensure_worker(key, py, config_name):
+    """按配置保证有一个可用的对话子进程；调用方必须持有 CHAT_LOCK。"""
+    w = CHAT_WORKER
+    if w["child"] and w["child"].alive() and w["key"] == key:
+        return w
+    _stop_worker()
+    q = queue.Queue()
+
+    def on_line(line):
         try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
+            q.put(json.loads(line))
+        except ValueError:
             pass
-        s = chat_mod.ChatSession(path, config=config_name or None)
-        CHAT_SESSION["obj"] = s
-        CHAT_SESSION["path"] = key
-        return s
+
+    child = spawn([py, os.path.join(ROOT, "code", "chat_worker.py"),
+                   "--config", config_name, "--parent-pid", str(os.getpid())],
+                  f"chat-{config_name}.log", on_line=on_line, stdin_pipe=True)
+    try:
+        msg = q.get(timeout=120)
+    except queue.Empty:
+        child.stop()
+        raise RuntimeError("对话进程启动超时（看 chat-*.log）")
+    if msg.get("event") == "error":
+        child.stop()
+        raise RuntimeError(msg.get("error") or "对话进程启动失败")
+    w.update(key=key, child=child, queue=q)
+    return w
 
 
-def probe_python(py):
-    code = ("import json,sys;"
-            "d={'version':sys.version.split()[0],'exe':sys.executable};"
-            "import importlib;"
-            "d['torch']=importlib.util.find_spec('torch') is not None;"
-            "d['numpy']=importlib.util.find_spec('numpy') is not None;"
-            "d['tk']=importlib.util.find_spec('tkinter') is not None;"
+PROBE_CACHE = {}
+
+
+def probe_python(py, use_cache=True):
+    """探测解释器：版本 / 位数 / torch / numpy / CUDA。
+
+    结果按 (exe, mtime) 缓存 10 分钟；点“测试环境”时传 use_cache=False 拿实时结果。
+    """
+    try:
+        key = (os.path.abspath(py), os.path.getmtime(py))
+    except OSError:
+        key = (py, 0)
+    now = time.time()
+    if use_cache:
+        hit = PROBE_CACHE.get(key)
+        if hit and now - hit[0] < 600:
+            return hit[1]
+
+    code = ("import json,sys,platform;"
+            "import importlib.util;"
+            "d={'version':sys.version.split()[0],'arch':platform.architecture()[0],"
+            "'exe':sys.executable,"
+            "'torch':importlib.util.find_spec('torch') is not None,"
+            "'numpy':importlib.util.find_spec('numpy') is not None};"
             "print(json.dumps(d))")
     try:
         r = subprocess.run([py, "-c", code], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=20)
-        info = json.loads((r.stdout or "{}").strip().splitlines()[-1])
-    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                           encoding="utf-8", errors="replace", timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "tried": [py]}
+    lines = (r.stdout or "").strip().splitlines()
+    if not lines:
+        return {"ok": False, "error": (r.stderr or "探测没有输出").strip()[-500:],
+                "tried": [py]}
+    try:
+        info = json.loads(lines[-1])
+    except ValueError:
+        return {"ok": False, "error": "解析探测输出失败", "tried": [py]}
+    info["ok"] = True
     if info.get("torch"):
         try:
             r2 = subprocess.run(
                 [py, "-c", "import torch;print(int(torch.cuda.is_available()));"
                            "print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-            lines = (r2.stdout or "").strip().splitlines()
-            info["cuda"] = bool(int(lines[0])) if lines else False
-            info["cuda_name"] = lines[1] if len(lines) > 1 else ""
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+            lines2 = (r2.stdout or "").strip().splitlines()
+            info["cuda"] = bool(int(lines2[0])) if lines2 else False
+            info["gpu"] = lines2[1] if len(lines2) > 1 else ""
         except (OSError, ValueError, subprocess.TimeoutExpired):
-            info["cuda"], info["cuda_name"] = False, ""
-    return {"ok": True, **info}
+            info["cuda"], info["gpu"] = False, ""
+    else:
+        info["cuda"], info["gpu"] = False, ""
+    if use_cache:
+        PROBE_CACHE[key] = (now, info)
+    return info
+
+
+VERIFIED = {}
+
+
+def _py_key(exe):
+    return os.path.normcase(os.path.abspath(exe))
+
+
+def verified_info(exe):
+    return VERIFIED.get(_py_key(exe))
+
+
+def remember_verified(exe, info):
+    VERIFIED[_py_key(exe)] = {"exe": exe, "info": info, "ts": time.time()}
 
 
 def port_in_use(port, host="127.0.0.1", timeout=0.3):
@@ -775,20 +991,7 @@ def port_in_use(port, host="127.0.0.1", timeout=0.3):
         s.close()
 
 
-def find_free_port(preferred):
-    s = socket.socket()
-    try:
-        s.bind(("127.0.0.1", preferred))
-        return preferred
-    except OSError:
-        pass
-    finally:
-        s.close()
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+
 
 
 def _lan_ipv4_from_adapters():
@@ -875,10 +1078,51 @@ def local_ip():
         s.close()
 
 
+
+
+
+
+
+
+class WebUIServer(ThreadingHTTPServer):
+    """WebUI 主端口独占：端口被占用时不要静默复用。"""
+    allow_reuse_address = False
+
+
+def bind_port(host, want):
+    """绑定 WebUI 端口；被占用时询问新端口，直接回车退出。"""
+    while True:
+        try:
+            return WebUIServer((host, want), Handler), want
+        except OSError as e:
+            print(f"[错误] 端口 {want} 被占用：{e}")
+            if not sys.stdin or not sys.stdin.isatty():
+                print("[错误] 当前不是交互终端，无法询问新端口；"
+                      "请用 --port 指定空闲端口，或关掉占用该端口的程序。")
+                sys.exit(1)
+            try:
+                ans = input("       直接回车退出；或输入新的端口号：").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n[退出] 已取消启动。")
+                sys.exit(1)
+            if not ans:
+                print("[退出] 已取消启动。")
+                sys.exit(0)
+            try:
+                n = int(ans)
+                if not (1 <= n <= 65535):
+                    raise ValueError
+            except ValueError:
+                print(f"[错误] 端口号不合法：{ans}（应为 1–65535）")
+                continue
+            want = n
+
+
 def main():
     global JOB_HANDLE
     ap = argparse.ArgumentParser(description="dlqq-llm 本地 WebUI")
-    ap.add_argument("--port", type=int, default=0, help="端口，0 = 自动挑一个空闲的")
+    ap.add_argument("--port", type=int, default=0,
+                    help="端口，默认 49134；被占用时会询问新端口")
     ap.add_argument("--host", default="127.0.0.1", help="监听地址，默认只绑本机")
     ap.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     ap.add_argument("--lan-port", type=int, default=49135,
@@ -891,17 +1135,15 @@ def main():
     JOB_HANDLE = _make_job_object()
     STATE["token"] = secrets.token_urlsafe(12)
     want = a.port or 49134
-    port = find_free_port(want)
     common.hide_dir(os.path.join(ROOT, ".ai_res"))
     os.makedirs(LOG_DIR, exist_ok=True)
 
+    httpd, port = bind_port(a.host, want)
     url = f"http://{a.host}:{port}/?t={STATE['token']}"
     print("=" * 66)
     print("  dlqq-llm WebUI")
     print("=" * 66)
     print(f"[地址] {url}")
-    if port != want:
-        print(f"[提示] 端口 {want} 被占用，已改用 {port}")
 
     lan = None
     if not a.no_lan:
@@ -920,14 +1162,12 @@ def main():
     print("[提示] 关浏览器不影响运行，重新访问上面的地址即可")
     print("=" * 66, flush=True)
 
+    httpd.daemon_threads = True
     if not a.no_browser:
         try:
-            webbrowser.open(url)
+            webbrowser.open(url)   # 先监听成功再开浏览器，避免打开时页面还没起来
         except Exception:
             pass
-
-    httpd = ThreadingHTTPServer((a.host, port), Handler)
-    httpd.daemon_threads = True
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

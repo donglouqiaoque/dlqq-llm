@@ -16,8 +16,14 @@
    **no framework, no CDN** (must work offline).
 2. **No tokenizer / HuggingFace / transformers**: this is a character-level model; the vocabulary
    is built by `code/train.py` itself.
-3. **Never run git commands** (not even `status` / `diff` / `log`) and **never read or write
-   the `.git` directory**. Ask the user about commit/staging state.
+3. **Three-tier git permissions; never widen them**: write operations (`commit` / `push` / `add` /
+   `reset` / `checkout`, etc.) are **absolutely forbidden even if the user authorizes them**; the
+   `.git` directory must **never be read or written, even if the user authorizes it** — no
+   standard editing tool (read/write/edit) and no script or command may touch any file under
+   `.git` (reading is forbidden too — a read command can be mistyped into a write/delete); only
+   read-only commands (`status` / `diff` / `log`, etc.) may be allowed once when the user
+   explicitly asks, and must stop immediately afterwards — no further use unless the user asks
+   again. There is no "the user allowed it implicitly" or "the user said it before" excuse.
 4. **No scripted bulk rewrites of source files**: edit file by file, confirm each change;
    for large refactors, list the plan first.
 5. **AI must not run side-effecting actions**: training, corpus download/cleaning, deleting files,
@@ -32,18 +38,31 @@
    corpora are backed up in `dlqq-llm-dataset`.
 10. **README / AGENTS must not describe ignored paths in detail**: only hints such as
     "caches may live under `.ai_res`" are allowed; the details go to `.ai_res\AIRES.md`.
+11. **Look before you create**: before adding any file or directory, list the current directory
+    first (confirm the path, the naming and whether it already exists); never invent a path or
+    create a folder blindly.
+12. **Answer the question, don't act**: when the user is only asking, confirming, consulting or
+    discussing something, **answer only** — do not change code, files or system settings, do not
+    run scripts or commands, do not start processes, and do not run tests. State the conclusion
+    from the information already available; act only when the user explicitly asks to change,
+    fix or run something. If unsure whether it is "just a question", treat it as one.
+13. **Match the user's language**: think and reply in the language the user asks in; default to
+    Simplified Chinese when no language is specified.
+14. **Keep Chinese and English docs in sync**: when changing `AGENTS.md` / `AGENTS.en.md` or
+    `README.md` / `README.en.md`, update both language versions together — never just one.
 
 ## 2. Layout (current architecture)
 
 ```
 Everything except start.bat lives under code\ and web\; script\ holds the launcher only.
 script/                 Double-click entry point (the only one)
-  start.bat             find python → run code\webui.py in the foreground → open browser
+  start.bat             prefers the bundled .python_env, falls back to PATH → runs code\webui.py → opens browser
   logo.ico              shortcut icon
 code/                   all Python
   webui.py              local web service: static files + JSON API + SSE + child processes
   train.py              training (data pipeline + model + loop + sampling)
   chat.py               chat core: ChatSession (load / reply_stream / set_params)
+  chat_worker.py        chat child: keeps ChatSession alive, JSON lines over stdin/stdout
   http_server.py        OpenAI-compatible bridge (ThreadingHTTPServer, lazy multi-model)
   common.py             find_root / order-preserving properties I/O / paths / watchdog / hide dir
   model_signature.py    weight SHA-256 signatures (compute / verify, stdlib only)
@@ -65,15 +84,18 @@ src/                    corpora (not in git)
 
 ```
 script\start.bat
-  └─ python code\webui.py            ← foreground; the console window is the lifecycle anchor
-       ├─ child python code\train.py --config <cfg> --parent-pid <webui_pid>
-       ├─ child python code\http_server.py --port <port> --events --parent-pid <webui_pid>
-       ├─ child python code\model_signature.py --mode compute|verify --parent-pid <webui_pid>
-       └─ in-process ChatSession (torch + model stay in the webui process)
+  └─ .python_env\python.exe code\webui.py    ← foreground; stdlib only, never imports torch
+       ├─ child <user python> code\train.py --config <cfg> --parent-pid <webui_pid>
+       ├─ child <user python> code\chat_worker.py --config <cfg> --parent-pid <webui_pid>
+       ├─ child <user python> code\http_server.py --port <port> --events --parent-pid <webui_pid>
+       └─ child .python_env\python.exe code\model_signature.py --mode compute|verify --parent-pid <webui_pid>
 ```
 
 - **No user-facing CLI**: docs must not advertise command-line usage. `--config` / `--parent-pid` /
   `--events` are an **internal protocol** between the WebUI and its children; no compatibility promise.
+- **Interpreter split**: the WebUI and the signature tool use the bundled `.python_env` (stdlib only);
+  training / chat / bridge use the user Python resolved by `common.resolve_python()`
+  (`properties\python=`, empty = PATH). Resolution failure is an error — no fallback.
 - **Lifecycle**: closing the cmd window of `start.bat` means exit — children are `terminate()`d,
   and `taskkill /F /T` is the fallback after 5 seconds. **Closing the browser tab is not an exit**;
   training keeps running and you can simply reopen the URL.
@@ -81,9 +103,10 @@ script\start.bat
   parent handle and call `os._exit(1)` when the parent is gone (protects against a hard-killed webui).
 - **Job Object**: children also join a `KILL_ON_JOB_CLOSE` job, so when the webui process dies the
   kernel kills every process in the job — even if the cmd window is force-closed mid-run.
-- **Ports**: the console defaults to `127.0.0.1:49134` (falls back to a random free port with a
-  notice if busy); the LAN read-only chat page defaults to `0.0.0.0:49135`
-  (`--lan-port` changes it, `--no-lan` disables it).
+- **Ports**: the console defaults to `127.0.0.1:49134`; if busy it does **not** switch ports
+  silently — it asks for a new port, and an empty Enter exits (`--port` behaves the same way).
+  The LAN read-only chat page defaults to `0.0.0.0:49135` (`--lan-port` changes it, `--no-lan`
+  disables it; if busy it only warns and continues).
 - **Security**: the console binds `127.0.0.1` only, generates a one-shot token per start and checks
   it on every `/api/*` call. The LAN port has no token but only serves the chat page,
   `/api/models` and `POST /api/chat`.
@@ -92,7 +115,7 @@ script\start.bat
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/env` | interpreter + dependency probe (version / torch / CUDA) |
+| GET | `/api/env` | query/check the user Python for `config=` or `all=1` (`check=1` probes; verified paths are remembered for this run) |
 | GET | `/api/configs` | config list with parsed key/values |
 | GET | `/api/models` | `model\**\*.pt` list (with signed flag) |
 | GET | `/api/chat/configs` | configs that map to an existing weight (name + model) |

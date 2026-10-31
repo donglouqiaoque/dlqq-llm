@@ -147,6 +147,7 @@ def _parse_argv(argv):
 
 
 _CFG_FILE, _PARENT_PID, _CHECK_ONLY, _OVERRIDES = _parse_argv(sys.argv[1:])
+print(f"[环境] 解释器：{sys.executable}", flush=True)
 
 if _CFG_FILE:
     _cfg_path = common.resolve_path(ROOT, _CFG_FILE)

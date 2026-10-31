@@ -42,7 +42,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 for _s in ("stdout", "stderr"):
     try:
-        getattr(sys, _s).reconfigure(encoding="utf-8", errors="replace")
+        # 由 WebUI 拉起时 stdout 是管道，必须逐行刷新，否则日志要等缓冲区满了才出现
+        getattr(sys, _s).reconfigure(encoding="utf-8", errors="replace",
+                                     line_buffering=True, write_through=True)
     except Exception:
         pass
 
@@ -50,69 +52,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 # ==================================================================
-# 启动它的 python 没装 torch 时，换一个装了 torch 的重新执行自己
+# 桥接服务必须有 torch；没有就直接报错退出，绝不自动换解释器
 # ==================================================================
-def _torch_ok(exe):
-    """问 pip 的清单最快；pip 不可用再真的 import 一次"""
-    if not exe or not os.path.isfile(exe):
-        return False
-    try:
-        import subprocess
-        r = subprocess.run([exe, "-m", "pip", "list"],
-                           capture_output=True, text=True, timeout=180)
-        if r.returncode == 0 and r.stdout:
-            return re.search(r"(?m)^torch\s", r.stdout) is not None
-    except Exception:
-        pass
-    try:
-        import subprocess
-        r = subprocess.run([exe, "-c", "import torch"], capture_output=True, timeout=600)
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
-def _relaunch_if_no_torch():
+def _require_torch():
     try:
         import torch  # noqa: F401
         return
-    except Exception:
-        pass
-
-    import shutil
-    import subprocess
-    # 只认 PATH（和显式指定），不去猜安装目录
-    cands = [os.environ.get("PYTHON") or os.environ.get("TLLM_PYTHON")]
-    for name in ("python", "python3", "py"):
-        exe = shutil.which(name)
-        if exe:
-            cands.append(exe)
-    cands.append(sys.executable)
-
-    me = os.path.abspath(__file__)
-    print(f"  当前解释器没有 torch：{sys.executable}")
-    print("  正在查找其它装了 torch 的 python …")
-    seen = set()
-    for exe in cands:
-        if not exe or exe in seen:
-            continue
-        seen.add(exe)
-        if os.path.abspath(exe).lower() == os.path.abspath(sys.executable).lower():
-            continue
-        if _torch_ok(exe):
-            print(f"  找到：{exe}")
-            print("  用它重新启动服务 …\n")
-            sys.stdout.flush()
-            try:
-                sys.exit(subprocess.call([exe, me] + sys.argv[1:], cwd=os.getcwd()))
-            except KeyboardInterrupt:
-                sys.exit(130)
-    print("  [错误] 没找到任何装了 torch 的 python。")
-    print("         装一个：python -m pip install torch")
-    sys.exit(1)
+    except Exception as e:
+        print(f"[错误] 当前解释器没有 torch：{sys.executable}")
+        print(f"       {type(e).__name__}: {e}")
+        print("       请检查 properties\\<配置>.properties 的 python=，"
+              "或在这个解释器里装好 torch")
+        sys.exit(1)
 
 
-_relaunch_if_no_torch()
+_require_torch()
 
 
 def find_root(start):

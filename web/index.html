@@ -105,6 +105,9 @@
   .sigrow .state.ok { color:var(--ok); border-color:var(--ok); }
   .sigrow .state.no { color:var(--warn); border-color:var(--warn); }
   .empty { color:var(--muted); text-align:center; padding:60px 0; font-size:13px; }
+  .pypath { max-width:300px; min-width:0; overflow-x:auto; white-space:nowrap;
+            font-family:Consolas, monospace; font-size:12px; color:var(--muted);
+            border:1px solid var(--line); border-radius:6px; padding:3px 8px; }
   #toast { position:fixed; right:18px; bottom:18px; background:#1d2430; border:1px solid var(--line);
            padding:10px 14px; border-radius:8px; display:none; max-width:420px; }
 </style>
@@ -132,6 +135,10 @@
       <button id="btnTrainResume">继续训练</button>
       <button class="danger" id="btnTrainStop" disabled>停止</button>
       <span class="muted" id="trainState">未运行</span>
+      <div class="pypath" id="trainPyPath">—</div>
+      <button id="btnTrainProbe">测试环境</button>
+      <span class="muted" id="trainProbeState">未检测</span>
+      <label class="muted"><input type="checkbox" id="trainProbeOnStart" checked> 启动时检测</label>
     </div>
     <div class="log" id="trainLog"></div>
   </section>
@@ -144,6 +151,10 @@
         <div class="composerbar">
           <select id="chatConfig" title="配置文件（模型、采样参数、语料都由它决定）"></select>
           <button id="btnNewChat">新对话</button>
+          <div class="pypath" id="chatPyPath">—</div>
+          <button id="btnChatProbe">测试环境</button>
+          <span class="muted" id="chatProbeState">未检测</span>
+          <label class="muted"><input type="checkbox" id="chatProbeOnSend" checked> 发送时检测</label>
           <span class="muted" id="chatState"></span>
           <div class="spacer"></div>
           <button class="danger" id="btnChatStop" disabled>停止</button>
@@ -160,6 +171,10 @@
       <label>端口</label><input type="number" id="srvPort" value="49128" style="width:110px">
       <button class="primary" id="btnSrvStart">启动服务</button>
       <button class="danger" id="btnSrvStop" disabled>停止</button>
+      <div class="pypath" id="srvPyPath">—</div>
+      <button id="btnSrvProbe">测试环境</button>
+      <span class="muted" id="srvProbeState">未检测</span>
+      <label class="muted"><input type="checkbox" id="srvProbeOnStart" checked> 启动服务时检测</label>
       <span class="muted" id="srvState">未运行</span>
       <span class="muted" id="srvUrl"></span>
     </div>
@@ -198,7 +213,7 @@
 <script>
 const TOKEN = new URLSearchParams(location.search).get('t') || '';
 const $ = s => document.querySelector(s);
-const api = (p, opt) => fetch(`/api/${p}?t=${TOKEN}`, opt).then(r => r.json());
+const api = (p, opt) => fetch(`/api/${p}${p.includes('?') ? '&' : '?'}t=${TOKEN}`, opt).then(r => r.json());
 function toast(msg, ms = 3000) {
   const t = $('#toast'); t.textContent = msg; t.style.display = 'block';
   clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', ms);
@@ -226,6 +241,7 @@ function applyConfigSelection(name) {
   $('#trainCfg').value = c.name;
   $('#cfgSelect').value = c.name;
   renderCfgForm();
+  loadPy('train', c.name);
 }
 async function loadConfigs() {
   const r = await api('configs');
@@ -238,7 +254,181 @@ async function loadConfigs() {
   $('#srvConfig').innerHTML = '<option value="">全部配置</option>' + CONFIGS.map(c =>
     `<option value="${c.name}">${c.name}</option>`).join('');
   renderCfgForm();
+  await loadAllPy();
 }
+
+const PY = {
+  chat:  { path: '', verified: false, info: null, paths: [] },
+  train: { path: '', verified: false, info: null, paths: [] },
+  srv:   { path: '', verified: false, info: null, paths: [] },
+};
+const PY_CFG = { chat: 'chatConfig', train: 'trainCfg', srv: 'srvConfig' };
+const PY_PROBE = { chat: 'btnChatProbe', train: 'btnTrainProbe', srv: 'btnSrvProbe' };
+const PY_RESULT = { chat: 'chatProbeState', train: 'trainProbeState', srv: 'srvProbeState' };
+const PY_ONSTART = { chat: 'chatProbeOnSend', train: 'trainProbeOnStart', srv: 'srvProbeOnStart' };
+const PY_PATH = { chat: 'chatPyPath', train: 'trainPyPath', srv: 'srvPyPath' };
+const PY_BTNS = { chat: ['btnSend'], train: ['btnTrainStart', 'btnTrainResume'], srv: ['btnSrvStart'] };
+
+function pyPass(info, needNumpy) {
+  return !!(info && info.ok && info.torch && (!needNumpy || info.numpy));
+}
+function pyResultText(info, needNumpy) {
+  if (!info) return '未检测';
+  if (!info.ok) return '不通过：' + (info.error || '未知错误');
+  const ok = pyPass(info, needNumpy);
+  const parts = [info.version, info.arch, info.torch ? 'torch' : '无 torch',
+                 info.numpy ? 'numpy' : '无 numpy'];
+  if (info.torch) parts.push(info.cuda ? ('CUDA：' + (info.gpu || '可用')) : 'CUDA 不可用');
+  return (ok ? '通过：' : '不通过：') + parts.join(' · ');
+}
+function srvAllOk() {
+  const items = PY.srv.paths || [];
+  return items.length > 0 && items.every(x => x.ok);
+}
+function srvAllUnknown() {
+  const items = PY.srv.paths || [];
+  return items.length > 0 && items.every(x => !x.info);
+}
+function renderPy(page) {
+  const st = PY[page];
+  const isAll = page === 'srv' && !$('#srvConfig').value;
+  const needNumpy = page === 'train';
+  let pathText, info, ok, resultText;
+  if (isAll) {
+    const items = st.paths || [];
+    const uniq = [...new Set(items.map(x => x.python).filter(Boolean))];
+    pathText = uniq.length ? uniq.join(' | ') : '（全部配置）';
+    ok = items.length > 0 && items.every(x => x.ok);
+    const failed = items.filter(x => x.info && (!x.info.ok || !x.info.torch));
+    info = failed.length ? failed[0].info : null;
+    resultText = ok ? ('通过：' + uniq.length + ' 个解释器')
+      : (failed.length
+          ? ('不通过：' + failed.map(x => x.config + '（' + (x.info.error || '缺 torch') + '）').join('；'))
+          : '未检测');
+  } else {
+    pathText = st.path || '—';
+    info = st.info;
+    ok = pyPass(info, needNumpy);
+    resultText = pyResultText(info, needNumpy);
+  }
+  const pathEl = $(`#${PY_PATH[page]}`);
+  pathEl.textContent = pathText;
+  pathEl.title = isAll ? pathText : (st.path || '');
+  const stateEl = $(`#${PY_RESULT[page]}`);
+  stateEl.textContent = resultText;
+  stateEl.style.color = ok ? 'var(--ok)' : (info ? 'var(--warn)' : 'var(--muted)');
+  const onStart = $(`#${PY_ONSTART[page]}`);
+  const checked = !!(onStart && onStart.checked);
+  const anyFailure = isAll
+    ? (st.paths || []).some(x => x.info && (!x.info.ok || !x.info.torch))
+    : (info && !ok);
+  const allUnknown = isAll ? srvAllUnknown() : !info;
+  const canStart = ok || (checked && !anyFailure && (allUnknown || isAll));
+  const running = {
+    chat: !!chatAbort,
+    train: !$('#btnTrainStop').disabled,
+    srv: !$('#btnSrvStop').disabled,
+  }[page];
+  PY_BTNS[page].forEach(id => { $('#' + id).disabled = !canStart || running; });
+  $(`#${PY_PROBE[page]}`).disabled = isAll && !(st.paths || []).length;
+}
+async function loadPy(page, cfg) {
+  const st = PY[page];
+  if (page === 'srv' && !cfg) {
+    try {
+      const r = await api('env?all=1');
+      st.paths = r.paths || [];
+      st.info = r.ok ? null : { ok: false, error: r.error || '解析失败' };
+    } catch (e) {
+      st.paths = [];
+      st.info = { ok: false, error: e.message };
+    }
+    st.path = ''; st.verified = false;
+    renderPy(page);
+    return;
+  }
+  st.paths = [];
+  if (!cfg) {
+    st.path = ''; st.verified = false; st.info = null;
+    renderPy(page);
+    return;
+  }
+  try {
+    const r = await api(`env?config=${encodeURIComponent(cfg)}`);
+    if (!r.ok) {
+      st.path = ''; st.verified = false;
+      st.info = { ok: false, error: r.error || '解析失败' };
+    } else {
+      st.path = r.user_python || '';
+      st.verified = !!r.verified;
+      st.info = r.info || null;
+    }
+  } catch (e) {
+    st.path = ''; st.verified = false;
+    st.info = { ok: false, error: e.message };
+  }
+  renderPy(page);
+}
+async function loadAllPy() {
+  await loadPy('chat', $('#chatConfig').value);
+  await loadPy('train', $('#trainCfg').value);
+  await loadPy('srv', $('#srvConfig').value);
+}
+async function probePage(page) {
+  const cfg = $(`#${PY_CFG[page]}`).value;
+  const st = PY[page];
+  $(`#${PY_RESULT[page]}`).textContent = '检测中…';
+  if (page === 'srv' && !cfg) {
+    let ok = false;
+    try {
+      const r = await api('env?all=1&check=1');
+      st.paths = r.paths || [];
+      st.info = r.ok ? null : { ok: false, error: r.error || '有配置检测不通过' };
+      ok = !!r.ok;
+    } catch (e) {
+      st.paths = [];
+      st.info = { ok: false, error: e.message };
+    }
+    renderPy(page);
+    return ok;
+  }
+  if (!cfg) { toast('请选择单个配置'); return false; }
+  try {
+    const r = await api(`env?config=${encodeURIComponent(cfg)}&check=1`);
+    if (!r.ok) {
+      st.verified = false;
+      st.info = { ok: false, error: r.error || '未知错误' };
+    } else {
+      st.path = r.user_python || st.path;
+      st.verified = !!r.verified;
+      st.info = r;
+    }
+  } catch (e) {
+    st.verified = false;
+    st.info = { ok: false, error: e.message };
+  }
+  renderPy(page);
+  return pyPass(st.info, page === 'train');
+}
+async function ensurePy(page) {
+  const needNumpy = page === 'train';
+  const isAll = page === 'srv' && !$('#srvConfig').value;
+  if (isAll ? srvAllOk() : pyPass(PY[page].info, needNumpy)) return true;
+  const cb = $(`#${PY_ONSTART[page]}`);
+  if (!cb || !cb.checked) {
+    toast('请先点“测试环境”检测当前配置的 Python');
+    return false;
+  }
+  const ok = await probePage(page);
+  if (!ok) toast('Python 环境检测不通过');
+  return ok;
+}
+Object.keys(PY_PROBE).forEach(page => {
+  $(`#${PY_PROBE[page]}`).onclick = () => probePage(page);
+  $(`#${PY_ONSTART[page]}`).onchange = () => renderPy(page);
+});
+$('#chatConfig').addEventListener('change', () => loadPy('chat', $('#chatConfig').value));
+$('#srvConfig').addEventListener('change', () => loadPy('srv', $('#srvConfig').value));
 $('#trainCfg').addEventListener('change', e => applyConfigSelection(e.target.value));
 // 每个配置键的中文解释（新增键时记得一起补）
 const KEY_INFO = {
@@ -288,12 +478,38 @@ function renderCfgForm() {
            <option ${v==='true'?'selected':''}>true</option>
            <option ${v==='false'?'selected':''}>false</option></select>`
       : `<input type="text" data-k="${k}" value="${esc(v)}">`;
+    const probe = (k === 'python')
+      ? `<button type="button" id="btnCfgProbe" style="margin-left:8px">测试环境</button>
+         <span id="cfgProbeState" style="margin-left:10px;font-size:12px;color:#9aa4b8"></span>`
+      : '';
     return `<div class="cfgrow">
       <div class="cfgmeta"><div class="k">${k}</div><div class="d">${esc(desc)}</div></div>
-      <div class="ctl">${ctl}</div>
+      <div class="ctl">${ctl}${probe}</div>
     </div>`;
   }).join('');
 }
+$('#cfgForm').addEventListener('click', async e => {
+  if (e.target.id !== 'btnCfgProbe') return;
+  const st = $('#cfgProbeState');
+  st.textContent = '检测中…';
+  st.style.color = '#9aa4b8';
+  try {
+    const r = await api(`env?config=${encodeURIComponent($('#cfgSelect').value)}`);
+    if (!r.ok) {
+      st.textContent = '测试不通过：' + (r.error || '未知错误');
+      st.style.color = '#e06c75';
+      return;
+    }
+    const ok = r.torch && r.numpy;
+    const parts = [r.version, r.arch, r.torch ? 'torch' : '无 torch', r.numpy ? 'numpy' : '无 numpy'];
+    if (r.torch) parts.push(r.cuda ? ('CUDA：' + (r.gpu || '可用')) : 'CUDA 不可用');
+    st.textContent = (ok ? '通过：' : '测试不通过：') + parts.join(' · ');
+    st.style.color = ok ? '#98c379' : '#e06c75';
+  } catch (err) {
+    st.textContent = '测试不通过：' + err.message;
+    st.style.color = '#e06c75';
+  }
+});
 $('#cfgSelect').onchange = renderCfgForm;
 $('#btnCfgSave').onclick = async () => {
   const name = $('#cfgSelect').value;
@@ -337,6 +553,7 @@ function bindEvents() {
 $('#btnTrainStart').onclick = () => startTrain(false);
 $('#btnTrainResume').onclick = () => startTrain(true);
 async function startTrain(resume) {
+  if (!(await ensurePy('train'))) return;
   const r = await api('train/start', {method:'POST', headers:{'Content-Type':'application/json'},
                                       body: JSON.stringify({config: $('#trainCfg').value, resume})});
   if (!r.ok) return toast('启动失败：' + r.error);
@@ -414,6 +631,7 @@ async function send() {
   if (!text || chatAbort) return;
   const cfgName = $('#chatConfig').value;
   if (!cfgName) { toast('先选一个配置'); return; }
+  if (!(await ensurePy('chat'))) return;
   $('#chatInput').value = '';
   $('#chatInput').style.height = 'auto';
   HISTORY.push({ role: 'user', content: text });
@@ -507,6 +725,7 @@ document.querySelectorAll('.subtabs button[data-srv]').forEach(b => b.onclick = 
 $('#btnClearSrv').onclick = () => { $('#srvChat').innerHTML = ''; $('#srvLog').textContent = ''; };
 
 $('#btnSrvStart').onclick = async () => {
+  if (!(await ensurePy('srv'))) return;
   const cfg = $('#srvConfig').value;
   const r = await api('server/start', {method:'POST', headers:{'Content-Type':'application/json'},
                                        body: JSON.stringify({port: +$('#srvPort').value,

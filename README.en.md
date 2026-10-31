@@ -34,7 +34,8 @@ in minutes.
 
 ## Quick start
 Double-click `script\start.bat`; the browser opens the local console at an address like
-`http://127.0.0.1:49134/?t=...`. Five tabs:
+`http://127.0.0.1:49134/?t=...`. If the port is busy it does not switch silently: it asks for a
+new port, and an empty Enter exits. Five tabs:
 
 | Tab | What it does |
 |---|---|
@@ -59,9 +60,12 @@ protocol between the WebUI and its child processes.
 
 | Item | Requirement |
 |---|---|
-| Python | 3.10 or newer (verified on 3.14) |
+| Python | 3.10 or newer (for training/chat; the WebUI ships its own runtime) |
 | torch | 2.x; install the CUDA build to use the GPU |
 | GPU | 8 GB VRAM runs the largest tier; CPU works but is much slower |
+
+> The WebUI runs on a bundled stripped-down Python runtime (standard library only), so it opens
+> even without Python installed; `torch` only matters for training and chat.
 
 Install (**torch is the only dependency**):
 
@@ -72,7 +76,9 @@ python -m pip install torch --index-url https://download.pytorch.org/whl/cu126
 Two notes:
 
 1. Install with `python -m pip install` into the interpreter you actually use (not `conda install`);
-2. Then run `script\start.bat (Train tab) chat_demo`; if training starts, the environment is fine (CPU fallback included).
+2. Then run `script\start.bat`; **press "Test environment" first** — the Train, Chat and Server tabs
+   all have this button. Only after it passes can you start training, send chat messages or start
+   the server.
 
 ### Which Python is used
 
@@ -89,7 +95,22 @@ There are exactly two sources, and **no automatic search**:
 - If the field is empty, PATH is used (`python`, then `python3`, then `py`); missing
   dependencies abort just the same.
 
-The chosen interpreter is printed at startup:
+**How checking works**:
+
+- Only the user triggers a check, by pressing "Test environment"; nothing probes automatically at startup;
+- On the Server tab the default is "all configs": the check walks every config's Python and
+  deduplicates by absolute path; all must pass before the server can start. If they map to more
+  than one distinct Python, starting fails;
+- The result is remembered **per absolute Python path for this run**: the same path is not checked
+  twice, switching configs reuses it when the path is unchanged, and a different path needs a new
+  check; restarting the WebUI clears all results;
+- The checkboxes (check on send / check on start / check on server start) are ticked by default:
+  when unchecked and the path is not verified, the button is disabled; when checked, clicking the
+  button runs the check first and disables it if the check fails;
+- The LAN chat page has no check button; it checks automatically on send and shows "chat failed"
+  if the check fails.
+
+The first line of the training log shows the actual interpreter:
 
 ```
 [环境] D:\Soft\Python\Python3_13_9\python.EXE
@@ -114,18 +135,10 @@ A wrong setting looks like this — training never starts:
 
 ### When the environment is wrong
 
-The training and chat scripts **do not self-check**; a missing dependency stops them
-immediately with the install command.
-
-```
-[错误] 运行环境缺少依赖：torch
-       请先安装：python -m pip install torch numpy
-```
+If the path is not verified, or the check fails, training / chat / the server will not start.
+The interpreter is **never swapped automatically**, and nothing is searched elsewhere on PATH.
 
 Without a GPU it falls back to CPU automatically (just slower); a missing CUDA never aborts the run.
-
-It also picks a torch-capable interpreter from PATH by itself, trying `python` /
-`python3` / `py`; if none works it says torch is missing instead of guessing install paths.
 
 ---
 
@@ -616,7 +629,7 @@ chat_max_new=200
 
 ## Runtime modes and VRAM
 
-Before every training or chat run, the environment is reported once:
+The training log reports the runtime environment (the chat page no longer shows the interpreter path):
 
 ```
 [模式] GPU —— 混合精度 bf16（推荐：显存占用更低、张量核更快）
@@ -639,12 +652,13 @@ When VRAM is short: lower `batch_size` → lower `block_size` → drop to a smal
 ## Directory layout
 ```
 script\                 double-click entry (the only one)
-  start.bat             find python → run code\webui.py in the foreground → open browser
+  start.bat             prefers the bundled runtime → runs code\webui.py → opens browser
   logo.ico              shortcut icon
 code\                   all Python
   webui.py              local web service: static files + JSON API + SSE + child processes
   train.py              training (data pipeline + model + loop + sampling)
   chat.py               chat core: ChatSession (load / streaming reply / set params)
+  chat_worker.py        chat child: keeps ChatSession alive, JSON lines over stdin/stdout
   http_server.py        OpenAI-compatible bridge (lazy multi-model loading)
   common.py             find_root / order-preserving properties I/O / watchdog / hide dir
   model_signature.py    weight SHA-256 signatures (stdlib only)
@@ -736,11 +750,15 @@ with `Compute on the Signature tab` (mandatory once the weights change).
 ---
 
 ## Serving the model to DSH
-On the **Server** tab: pick a config (default: all), set the port (default 49128) and press Start;
-the page shows `http://127.0.0.1:49128/v1`, which you put into the DSH provider settings. Every
-request then appears in the session list below (fed by the `@@EV@@` lines the service prints to
-stdout), so you debug from the page instead of the console. Press Stop to shut it down — closing
-the `start.bat` window also stops it.
+On the **Server** tab: the default is "all configs"; pressing "Test environment" checks the
+Python of every config (deduplicated by absolute path, so the same path is checked once). You can
+also check a single config. With "check on server start" ticked, a missing check is done
+automatically before launch. If "all configs" map to more than one distinct Python, starting the
+server fails — make `python=` consistent or pick a single config. Then set the port (default
+49128) and press Start. The page shows `http://127.0.0.1:49128/v1`, which you put into the DSH
+provider settings. Every request then appears in the session list below (fed by the `@@EV@@`
+lines the service prints to stdout), so you debug from the page instead of the console. Press
+Stop to shut it down — closing the `start.bat` window also stops it.
 
 The service is OpenAI-compatible: `/v1/models` and `/v1/chat/completions` (with `stream`).
 Models come from the `properties\` configs whose `model=` points at an existing weight (no more
